@@ -36,6 +36,7 @@ export function PublisherNode({ data, selected }: NodeProps<PublisherNodeData>) 
         </div>
         <div className="chip">{data.signalKind}</div>
       </div>
+      {data.note ? <div className="rounded-xl bg-white/5 px-3 py-2 text-xs text-slate-300">{data.note}</div> : null}
       <div className="space-y-2 text-sm">
         <div>
           <div className="label">Address</div>
@@ -70,6 +71,7 @@ export function SubscriberNode({ data, selected }: NodeProps<SubscriberNodeData>
         </div>
         <div className="chip">{data.received.length} received</div>
       </div>
+      {data.note ? <div className="rounded-xl bg-white/5 px-3 py-2 text-xs text-slate-300">{data.note}</div> : null}
       <div className="space-y-2 text-sm">
         <div>
           <div className="label">Expression</div>
@@ -124,6 +126,7 @@ export function ConfigNode({ data, selected }: NodeProps<ConfigNodeData>) {
         </div>
         <div className="chip">bus</div>
       </div>
+      {data.note ? <div className="rounded-xl bg-white/5 px-3 py-2 text-xs text-slate-300">{data.note}</div> : null}
       <div className="space-y-2 text-sm text-slate-200">
         <div className="rounded-xl bg-white/5 px-3 py-2 text-xs">
           catch-all: <span className="font-semibold">{String(data.allowCatchAll)}</span>
@@ -151,6 +154,7 @@ export function ServiceNode({ data, selected }: NodeProps<ServiceNodeData>) {
         </div>
         <div className="chip">service</div>
       </div>
+      {data.note ? <div className="rounded-xl bg-white/5 px-3 py-2 text-xs text-slate-300">{data.note}</div> : null}
       <div className="space-y-2 text-sm">
         <div>
           <div className="label">Address</div>

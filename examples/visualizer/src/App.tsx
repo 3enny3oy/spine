@@ -22,6 +22,24 @@ import {
 import { ConfigNode, PublisherNode, ServiceNode, SubscriberNode } from "./components/GraphNodes";
 import { InspectorDialog } from "./components/InspectorDialog";
 
+const CAFE_STORY_PUBLISHERS = [
+  "publisher-queue-alice",
+  "publisher-queue-bob",
+  "publisher-table-open",
+  "publisher-seat-alice",
+  "publisher-menus",
+  "publisher-order",
+  "publisher-ticket",
+  "publisher-prep",
+  "publisher-ready",
+  "publisher-serve",
+  "publisher-bill-request",
+  "publisher-bill",
+  "publisher-pay",
+  "publisher-clear",
+  "publisher-seat-bob",
+] as const;
+
 const nodeTypes = {
   publisher: PublisherNode,
   subscriber: SubscriberNode,
@@ -35,6 +53,7 @@ export function App() {
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [backendState, setBackendState] = useState<"connecting" | "live" | "offline">("connecting");
   const [requestError, setRequestError] = useState<string | null>(null);
+  const [storyRunning, setStoryRunning] = useState(false);
   const menuStore = useMenuStore();
 
   const applySnapshot = useCallback(
@@ -86,6 +105,7 @@ export function App() {
   const config = snapshot?.config ?? null;
   const sidebarTrace = publishHistory[0] ?? null;
   const errorMessage = requestError ?? snapshot?.lastError ?? null;
+  const nodeTitles = useMemo(() => new Map(nodes.map((node) => [node.id, node.data.title])), [nodes]);
 
   const flowEdges = useMemo(
     () =>
@@ -104,6 +124,13 @@ export function App() {
       })),
     [routes],
   );
+
+  async function publishNode(nodeId: string) {
+    const next = await publishFromPublisher(nodeId);
+    applySnapshot(next);
+    setRequestError(null);
+    return next;
+  }
 
   async function handleAddNode(kind: DemoNodeData["kind"]) {
     try {
@@ -143,11 +170,27 @@ export function App() {
 
   async function handlePublish(nodeId: string) {
     try {
-      const next = await publishFromPublisher(nodeId);
-      applySnapshot(next);
-      setRequestError(null);
+      await publishNode(nodeId);
     } catch (error) {
       setRequestError(error instanceof Error ? error.message : "Failed to publish from node");
+    }
+  }
+
+  async function handlePlayCafeStory() {
+    if (storyRunning) {
+      return;
+    }
+    setStoryRunning(true);
+    setRequestError(null);
+    try {
+      for (const nodeId of CAFE_STORY_PUBLISHERS) {
+        await publishNode(nodeId);
+        await new Promise((resolve) => setTimeout(resolve, 280));
+      }
+    } catch (error) {
+      setRequestError(error instanceof Error ? error.message : "Failed to play cafe story");
+    } finally {
+      setStoryRunning(false);
     }
   }
 
@@ -161,17 +204,21 @@ export function App() {
                 SPINE visualizer
               </div>
               <h1 className="mt-1 text-2xl font-semibold text-white">
-                Routed pub / sub paths with live payload feedback
+                Cafe service flow with live payload feedback
               </h1>
               <p className="mt-2 max-w-3xl text-sm text-slate-300">
-                This canvas is wired to the Rust backend. Edit node expressions and bus controls,
-                then publish from a node to see the payload flow through real subscriptions.
+                The café preset shows the queue, seating, menu hand-off, kitchen prep, food
+                service, billing, and turnover. Publish individual nodes or run the full story
+                from the toolbar.
               </p>
             </div>
             <div className="flex flex-wrap items-center gap-2">
               <MenuButton className="accent-button" store={menuStore}>
                 Add node
               </MenuButton>
+              <button className="accent-button" onClick={handlePlayCafeStory} disabled={storyRunning}>
+                {storyRunning ? "Playing story..." : "Play cafe story"}
+              </button>
               <button
                 className="glass-button"
                 onClick={() => setSelectedNodeId(config?.id ?? null)}
@@ -179,6 +226,7 @@ export function App() {
               >
                 Bus config
               </button>
+              <div className="chip">scenario: cafe</div>
               <div className="chip">backend: {backendState}</div>
               <div className="chip">nodes: {nodes.length}</div>
               <div className="chip">routes: {routes.length}</div>
@@ -274,7 +322,10 @@ export function App() {
                 <div className="rounded-2xl border border-cyan-400/20 bg-cyan-400/10 p-4">
                   <div className="flex items-center justify-between">
                     <div className="text-sm font-semibold text-cyan-100">Most recent publish</div>
-                    <div className="chip">signal {sidebarTrace.signalId}</div>
+                    <div className="chip">
+                      signal {sidebarTrace.signalId} ·{" "}
+                      {nodeTitles.get(sidebarTrace.fromNodeId) ?? sidebarTrace.fromNodeId}
+                    </div>
                   </div>
                   <div className="mt-3 space-y-2 text-xs text-cyan-100/90">
                     <div>
@@ -296,7 +347,7 @@ export function App() {
                 </div>
               ) : (
                 <div className="rounded-2xl border border-dashed border-white/10 bg-white/5 p-4 text-sm text-slate-400">
-                  Publish from the publisher node to generate a live trace.
+                  Publish any story node or run the cafe sequence to generate a live trace.
                 </div>
               )}
 
@@ -304,7 +355,11 @@ export function App() {
                 <div className="label">Delivery events</div>
                 {sidebarTrace?.deliveries.length ? (
                   sidebarTrace.deliveries.map((delivery, index) => (
-                    <DeliveryCard key={`${delivery.subscriberNodeId}-${index}`} delivery={delivery} />
+                    <DeliveryCard
+                      key={`${delivery.subscriberNodeId}-${index}`}
+                      delivery={delivery}
+                      subscriberLabel={nodeTitles.get(delivery.subscriberNodeId) ?? delivery.subscriberNodeId}
+                    />
                   ))
                 ) : (
                   <div className="rounded-2xl border border-dashed border-white/10 bg-white/5 p-4 text-sm text-slate-400">
@@ -345,11 +400,17 @@ function mergeNodes(current: Node<DemoNodeData>[], next: Node<DemoNodeData>[]): 
   });
 }
 
-function DeliveryCard({ delivery }: { delivery: DeliveryTrace }) {
+function DeliveryCard({
+  delivery,
+  subscriberLabel,
+}: {
+  delivery: DeliveryTrace;
+  subscriberLabel: string;
+}) {
   return (
     <article className="rounded-2xl border border-white/10 bg-white/5 p-4">
       <div className="flex items-center justify-between gap-3">
-        <div className="text-sm font-semibold text-white">{delivery.subscriberNodeId}</div>
+        <div className="text-sm font-semibold text-white">{subscriberLabel}</div>
         <div className={`chip ${delivery.accepted ? "border-cyan-400/20 bg-cyan-400/10" : ""}`}>
           {delivery.accepted ? "accepted" : "dropped"}
         </div>

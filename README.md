@@ -78,4 +78,4 @@ The test suite covers parsing, matching, specificity ordering, selective deliver
 
 ## Examples
 
-- [Interactive visualizer](examples/visualizer/README.md) with the browser UI driving the Rust backend
+- [Interactive cafe visualizer](examples/visualizer/README.md) with the browser UI driving the Rust backend
