@@ -12,6 +12,18 @@ use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const DEFAULT_ADDR: &str = "127.0.0.1:8787";
+const CAFE_CONFIG_X: i32 = 420;
+const CAFE_CONFIG_Y: i32 = 40;
+const CAFE_PUBLISHER_START_X: i32 = 60;
+const CAFE_PUBLISHER_START_Y: i32 = 120;
+const CAFE_PUBLISHER_COLUMN_STEP: i32 = 360;
+const CAFE_PUBLISHER_ROW_STEP: i32 = 360;
+const CAFE_SUBSCRIBER_X: i32 = 1200;
+const CAFE_SUBSCRIBER_START_Y: i32 = 120;
+const CAFE_SUBSCRIBER_ROW_STEP: i32 = 360;
+const CAFE_SERVICE_X: i32 = 1540;
+const CAFE_SERVICE_START_Y: i32 = 480;
+const CAFE_SERVICE_ROW_STEP: i32 = 240;
 
 fn main() {
     if let Err(err) = run() {
@@ -22,7 +34,8 @@ fn main() {
 
 fn run() -> Result<(), String> {
     let runtime = Arc::new(Runtime::new());
-    let listener = TcpListener::bind(DEFAULT_ADDR).map_err(|err| format!("bind {DEFAULT_ADDR}: {err}"))?;
+    let listener =
+        TcpListener::bind(DEFAULT_ADDR).map_err(|err| format!("bind {DEFAULT_ADDR}: {err}"))?;
     eprintln!("SPINE visualizer backend listening on http://{DEFAULT_ADDR}");
 
     for stream in listener.incoming() {
@@ -52,7 +65,12 @@ impl Runtime {
             inner: Arc::new(Mutex::new(AppState::default())),
             update_cv: Arc::new(Condvar::new()),
             events: Broadcaster::new(),
-            bus: Arc::new(Mutex::new(SignalBus::builder().allow_catch_all(false).default_queue_depth(1024).build())),
+            bus: Arc::new(Mutex::new(
+                SignalBus::builder()
+                    .allow_catch_all(false)
+                    .default_queue_depth(1024)
+                    .build(),
+            )),
             handles: Arc::new(Mutex::new(Vec::new())),
         };
         runtime.sync_bus().expect("initial sync");
@@ -76,14 +94,10 @@ impl Runtime {
             .build();
 
         let mut handles = Vec::new();
-        for subscriber in state
-            .nodes
-            .iter()
-            .filter_map(|node| match node {
-                Node::Subscriber(subscriber) => Some(subscriber.clone()),
-                _ => None,
-            })
-        {
+        for subscriber in state.nodes.iter().filter_map(|node| match node {
+            Node::Subscriber(subscriber) => Some(subscriber.clone()),
+            _ => None,
+        }) {
             let state = Arc::clone(&self.inner);
             let update_cv = Arc::clone(&self.update_cv);
             let events = self.events.clone();
@@ -101,7 +115,14 @@ impl Runtime {
                         let events = events.clone();
                         let subscriber_id = subscriber_id.clone();
                         async move {
-                            record_delivery(&state, &update_cv, &events, subscriber_id, ctx, signal)?;
+                            record_delivery(
+                                &state,
+                                &update_cv,
+                                &events,
+                                subscriber_id,
+                                ctx,
+                                signal,
+                            )?;
                             Ok(())
                         }
                     },
@@ -119,33 +140,62 @@ impl Runtime {
     fn publish_from(&self, publisher_id: &str) -> Result<Snapshot, String> {
         let publisher = {
             let state = self.inner.lock().unwrap();
-            match state
-                .nodes
-                .iter()
-                .find_map(|node| match node {
-                    Node::Publisher(publisher) if publisher.id == publisher_id => Some(publisher.clone()),
-                    _ => None,
-                }) {
+            match state.nodes.iter().find_map(|node| match node {
+                Node::Publisher(publisher) if publisher.id == publisher_id => {
+                    Some(publisher.clone())
+                }
+                _ => None,
+            }) {
                 Some(publisher) => publisher,
                 None => return Err(format!("publisher not found: {publisher_id}")),
             }
         };
 
+        self.publish_signal(&publisher.id, publisher.address, publisher.payload_text)
+    }
+
+    fn publish_signal(
+        &self,
+        from_node_id: &str,
+        address: String,
+        payload_text: String,
+    ) -> Result<Snapshot, String> {
+        {
+            let state = self.inner.lock().unwrap();
+            if state.nodes.iter().all(|node| node.id() != from_node_id) {
+                return Err(format!("node not found: {from_node_id}"));
+            }
+        }
+
         let bus = self.bus.lock().unwrap().clone();
         let result = bus
-            .publish(publisher.address.clone(), publisher.payload_text.clone())
+            .publish(address.clone(), payload_text.clone())
             .map_err(|err| format!("publish failed: {err}"))?;
         self.wait_for_deliveries(result.signal_id, result.accepted_deliveries);
 
         let mut state = self.inner.lock().unwrap();
-        if let Some(Node::Publisher(node)) = state.nodes.iter_mut().find(|node| node.id() == publisher_id) {
-            node.last_pulse = now_millis();
+        if let Some(node) = state
+            .nodes
+            .iter_mut()
+            .find(|node| node.id() == from_node_id)
+        {
+            node.mark_pulse(now_millis());
         }
-        let trace = trace_from_publish(&state, &publisher, result);
+        let trace = trace_from_signal(&state, from_node_id, &address, &payload_text, result);
         state.publish_history.insert(0, trace);
-        state.publish_history.truncate(12);
+        state.publish_history.truncate(200);
         let snapshot = state.snapshot();
         drop(state);
+        self.events.broadcast(snapshot.to_json());
+        Ok(snapshot)
+    }
+
+    fn load_scenario(&self, scenario_id: &str) -> Result<Snapshot, String> {
+        let mut state = self.inner.lock().unwrap();
+        *state = AppState::for_scenario(scenario_id)?;
+        drop(state);
+        self.sync_bus()?;
+        let snapshot = self.snapshot();
         self.events.broadcast(snapshot.to_json());
         Ok(snapshot)
     }
@@ -177,14 +227,17 @@ impl Runtime {
 
     fn update_config(&self, form: &HashMap<String, String>) -> Result<Snapshot, String> {
         let mut state = self.inner.lock().unwrap();
-        state.config.allow_catch_all = parse_bool(form.get("allow_catch_all").map(String::as_str)).unwrap_or(false);
-        state.config.default_queue_depth = parse_usize(form.get("default_queue_depth").map(String::as_str)).unwrap_or(1024);
+        state.config.allow_catch_all =
+            parse_bool(form.get("allow_catch_all").map(String::as_str)).unwrap_or(false);
+        state.config.default_queue_depth =
+            parse_usize(form.get("default_queue_depth").map(String::as_str)).unwrap_or(1024);
         state.config.recursion_policy.max_causation_depth =
             parse_usize(form.get("recursion_depth").map(String::as_str)).unwrap_or(32);
-        state.config.recursion_policy.on_exceeded = match form.get("on_exceeded").map(String::as_str) {
-            Some("Drop") => RecursionOverflowPolicy::Drop,
-            _ => RecursionOverflowPolicy::RejectPublish,
-        };
+        state.config.recursion_policy.on_exceeded =
+            match form.get("on_exceeded").map(String::as_str) {
+                Some("Drop") => RecursionOverflowPolicy::Drop,
+                _ => RecursionOverflowPolicy::RejectPublish,
+            };
         drop(state);
         self.sync_bus()?;
         let snapshot = self.snapshot();
@@ -199,13 +252,25 @@ impl Runtime {
         let node = match kind {
             "publisher" => {
                 let (x, y) = next_publisher_position(&state);
-                Node::Publisher(PublisherNode::default_with_id(format!("publisher-{idx}"), x, y))
+                Node::Publisher(PublisherNode::default_with_id(
+                    format!("publisher-{idx}"),
+                    x,
+                    y,
+                ))
             }
             "subscriber" => {
                 let (x, y) = next_subscriber_position(&state);
-                Node::Subscriber(SubscriberNode::default_with_id(format!("subscriber-{idx}"), x, y))
+                Node::Subscriber(SubscriberNode::default_with_id(
+                    format!("subscriber-{idx}"),
+                    x,
+                    y,
+                ))
             }
-            "config" => Node::Config(ConfigNode::default_with_id(format!("config-{idx}"), 470, 40)),
+            "config" => Node::Config(ConfigNode::default_with_id(
+                format!("config-{idx}"),
+                CAFE_CONFIG_X,
+                CAFE_CONFIG_Y,
+            )),
             "service" => {
                 let (x, y) = next_service_position(&state);
                 Node::Service(ServiceNode::default_with_id(format!("service-{idx}"), x, y))
@@ -220,7 +285,11 @@ impl Runtime {
         Ok(snapshot)
     }
 
-    fn update_node(&self, node_id: &str, form: &HashMap<String, String>) -> Result<Snapshot, String> {
+    fn update_node(
+        &self,
+        node_id: &str,
+        form: &HashMap<String, String>,
+    ) -> Result<Snapshot, String> {
         let mut state = self.inner.lock().unwrap();
         let Some(node) = state.nodes.iter_mut().find(|node| node.id() == node_id) else {
             return Err(format!("node not found: {node_id}"));
@@ -240,6 +309,7 @@ impl Runtime {
 
 #[derive(Clone)]
 struct AppState {
+    scenario_id: String,
     config: ConfigNode,
     nodes: Vec<Node>,
     publish_history: Vec<PublishTrace>,
@@ -248,291 +318,331 @@ struct AppState {
 
 impl Default for AppState {
     fn default() -> Self {
-        Self::cafe()
+        Self::for_scenario("cafe-pipeline").expect("default scenario")
     }
 }
 
 impl AppState {
-    fn cafe() -> Self {
-        let config = ConfigNode::default_with_id("config-1".to_string(), 470, 40);
+    fn for_scenario(scenario_id: &str) -> Result<Self, String> {
+        match scenario_id {
+            "blank" => Ok(Self::blank()),
+            "cafe-pipeline" => Ok(Self::cafe_pipeline()),
+            other => Err(format!("unknown scenario: {other}")),
+        }
+    }
+
+    fn blank() -> Self {
+        Self {
+            scenario_id: "blank".to_string(),
+            config: ConfigNode::default_with_id(
+                "config-1".to_string(),
+                CAFE_CONFIG_X,
+                CAFE_CONFIG_Y,
+            ),
+            nodes: vec![Node::Config(ConfigNode::default_with_id(
+                "config-1".to_string(),
+                CAFE_CONFIG_X,
+                CAFE_CONFIG_Y,
+            ))],
+            publish_history: Vec::new(),
+            publish_delivery_counts: HashMap::new(),
+        }
+    }
+
+    fn cafe_pipeline() -> Self {
+        let config =
+            ConfigNode::default_with_id("config-1".to_string(), CAFE_CONFIG_X, CAFE_CONFIG_Y);
         let nodes = vec![
             Node::Publisher(PublisherNode {
-                id: "publisher-queue-alice".to_string(),
-                title: "Customer Alice arrives".to_string(),
+                id: "publisher-arrivals".to_string(),
+                title: "Arrival feed".to_string(),
                 last_pulse: 0,
-                position_x: 60,
-                position_y: 120,
-                address: "cafe/queue/customers/alice/arrived".to_string(),
-                payload_text: "{\n  \"customerId\": \"alice\",\n  \"name\": \"Ava\",\n  \"partySize\": 2,\n  \"notes\": \"Waiting by the host stand\"\n}".to_string(),
+                position_x: CAFE_PUBLISHER_START_X,
+                position_y: CAFE_PUBLISHER_START_Y,
+                address: "cafe/customers/example-customer/arrived".to_string(),
+                payload_text: "{\n  \"customerId\": \"customer-001\",\n  \"partySize\": 2,\n  \"arrivedAtMs\": 0\n}".to_string(),
                 signal_kind: "Event".to_string(),
                 custom_signal_kind: String::new(),
                 metadata: SignalMetadata::default(),
-                note: "Alice joins the queue at the front door.".to_string(),
+                note: "Generates customer arrivals at the configured rate.".to_string(),
             }),
             Node::Publisher(PublisherNode {
-                id: "publisher-queue-bob".to_string(),
-                title: "Customer Bob arrives".to_string(),
+                id: "publisher-queue".to_string(),
+                title: "Queue manager".to_string(),
                 last_pulse: 0,
-                position_x: 360,
-                position_y: 120,
-                address: "cafe/queue/customers/bob/arrived".to_string(),
-                payload_text: "{\n  \"customerId\": \"bob\",\n  \"name\": \"Ben\",\n  \"partySize\": 1,\n  \"notes\": \"Standing behind Alice in the queue\"\n}".to_string(),
+                position_x: CAFE_PUBLISHER_START_X + CAFE_PUBLISHER_COLUMN_STEP,
+                position_y: CAFE_PUBLISHER_START_Y,
+                address: "cafe/queue/front/example-customer/queued".to_string(),
+                payload_text: "{\n  \"customerId\": \"customer-001\",\n  \"queueDepth\": 1,\n  \"capacity\": 12\n}".to_string(),
                 signal_kind: "Event".to_string(),
                 custom_signal_kind: String::new(),
                 metadata: SignalMetadata::default(),
-                note: "Bob waits behind the first party.".to_string(),
+                note: "Applies queue capacity rules and keeps track of the front customer.".to_string(),
             }),
             Node::Publisher(PublisherNode {
-                id: "publisher-table-open".to_string(),
-                title: "Table 7 opens".to_string(),
+                id: "publisher-concierge".to_string(),
+                title: "Concierge".to_string(),
                 last_pulse: 0,
-                position_x: 660,
-                position_y: 120,
-                address: "cafe/tables/7/opened".to_string(),
-                payload_text: "{\n  \"tableId\": \"7\",\n  \"cleaned\": true,\n  \"readyForNextParty\": true\n}".to_string(),
+                position_x: CAFE_PUBLISHER_START_X + CAFE_PUBLISHER_COLUMN_STEP * 2,
+                position_y: CAFE_PUBLISHER_START_Y,
+                address: "cafe/queue/front/example-customer/greeted".to_string(),
+                payload_text: "{\n  \"customerId\": \"customer-001\",\n  \"greetedAtMs\": 0\n}".to_string(),
                 signal_kind: "Event".to_string(),
                 custom_signal_kind: String::new(),
                 metadata: SignalMetadata::default(),
-                note: "A table frees up and the host can seat the next party.".to_string(),
+                note: "Greets whoever is at the head of the queue.".to_string(),
             }),
             Node::Publisher(PublisherNode {
-                id: "publisher-seat-alice".to_string(),
-                title: "Host seats Alice".to_string(),
+                id: "publisher-waiter-router".to_string(),
+                title: "Waiter router".to_string(),
                 last_pulse: 0,
-                position_x: 60,
-                position_y: 430,
-                address: "cafe/tables/7/seated".to_string(),
-                payload_text: "{\n  \"tableId\": \"7\",\n  \"customerId\": \"alice\",\n  \"waiter\": \"Mira\"\n}".to_string(),
+                position_x: CAFE_PUBLISHER_START_X,
+                position_y: CAFE_PUBLISHER_START_Y + CAFE_PUBLISHER_ROW_STEP,
+                address: "cafe/service/request/seat".to_string(),
+                payload_text: "{\n  \"requestType\": \"seat\",\n  \"customerId\": \"customer-001\"\n}".to_string(),
                 signal_kind: "Event".to_string(),
                 custom_signal_kind: String::new(),
                 metadata: SignalMetadata::default(),
-                note: "The host escorts Alice to the newly open table.".to_string(),
+                note: "Resolves service requests onto the two-waiter pool.".to_string(),
             }),
             Node::Publisher(PublisherNode {
-                id: "publisher-menus".to_string(),
-                title: "Waiter gives menus".to_string(),
+                id: "publisher-seating".to_string(),
+                title: "Seating service".to_string(),
                 last_pulse: 0,
-                position_x: 360,
-                position_y: 430,
-                address: "cafe/tables/7/menus-delivered".to_string(),
-                payload_text: "{\n  \"tableId\": \"7\",\n  \"waiter\": \"Mira\",\n  \"menu\": \"brunch\"\n}".to_string(),
+                position_x: CAFE_PUBLISHER_START_X + CAFE_PUBLISHER_COLUMN_STEP,
+                position_y: CAFE_PUBLISHER_START_Y + CAFE_PUBLISHER_ROW_STEP,
+                address: "cafe/tables/table-01/seated".to_string(),
+                payload_text: "{\n  \"tableId\": \"table-01\",\n  \"customerId\": \"customer-001\",\n  \"waiterId\": \"waiter-1\"\n}".to_string(),
                 signal_kind: "Event".to_string(),
                 custom_signal_kind: String::new(),
                 metadata: SignalMetadata::default(),
-                note: "The waiter drops menus and gives the party time to look around.".to_string(),
+                note: "Allocates a free table to the next queued customer.".to_string(),
+            }),
+            Node::Publisher(PublisherNode {
+                id: "publisher-menu".to_string(),
+                title: "Menu service".to_string(),
+                last_pulse: 0,
+                position_x: CAFE_PUBLISHER_START_X + CAFE_PUBLISHER_COLUMN_STEP * 2,
+                position_y: CAFE_PUBLISHER_START_Y + CAFE_PUBLISHER_ROW_STEP,
+                address: "cafe/tables/table-01/menu-delivered".to_string(),
+                payload_text: "{\n  \"tableId\": \"table-01\",\n  \"customerId\": \"customer-001\",\n  \"menuId\": \"brunch\"\n}".to_string(),
+                signal_kind: "Event".to_string(),
+                custom_signal_kind: String::new(),
+                metadata: SignalMetadata::default(),
+                note: "Delivers menu payloads while waiters continue handling other work.".to_string(),
             }),
             Node::Publisher(PublisherNode {
                 id: "publisher-order".to_string(),
-                title: "Alice chooses lunch".to_string(),
+                title: "Order dispatch".to_string(),
                 last_pulse: 0,
-                position_x: 660,
-                position_y: 430,
-                address: "cafe/orders/order-17/placed".to_string(),
-                payload_text: "{\n  \"orderId\": \"order-17\",\n  \"customerId\": \"alice\",\n  \"items\": [\"mushroom burger\", \"lemonade\"]\n}".to_string(),
+                position_x: CAFE_PUBLISHER_START_X,
+                position_y: CAFE_PUBLISHER_START_Y + CAFE_PUBLISHER_ROW_STEP * 2,
+                address: "cafe/orders/order-01/placed".to_string(),
+                payload_text: "{\n  \"orderId\": \"order-01\",\n  \"tableId\": \"table-01\",\n  \"dishId\": \"ramen\"\n}".to_string(),
                 signal_kind: "Event".to_string(),
                 custom_signal_kind: String::new(),
                 metadata: SignalMetadata::default(),
-                note: "Alice settles on lunch and the order is ready to send.".to_string(),
+                note: "Takes orders from ready diners and forwards them to the kitchen.".to_string(),
             }),
             Node::Publisher(PublisherNode {
-                id: "publisher-ticket".to_string(),
-                title: "Waiter sends ticket".to_string(),
+                id: "publisher-kitchen".to_string(),
+                title: "Kitchen line".to_string(),
                 last_pulse: 0,
-                position_x: 60,
-                position_y: 740,
-                address: "cafe/orders/order-17/ticketed".to_string(),
-                payload_text: "{\n  \"orderId\": \"order-17\",\n  \"waiter\": \"Mira\",\n  \"station\": \"kitchen pass\"\n}".to_string(),
+                position_x: CAFE_PUBLISHER_START_X + CAFE_PUBLISHER_COLUMN_STEP,
+                position_y: CAFE_PUBLISHER_START_Y + CAFE_PUBLISHER_ROW_STEP * 2,
+                address: "cafe/kitchen/orders/order-01/ready".to_string(),
+                payload_text: "{\n  \"orderId\": \"order-01\",\n  \"dishId\": \"ramen\",\n  \"prepMs\": 4500\n}".to_string(),
                 signal_kind: "Event".to_string(),
                 custom_signal_kind: String::new(),
                 metadata: SignalMetadata::default(),
-                note: "The waiter relays the chosen items to the kitchen.".to_string(),
+                note: "Runs tickets through the sequential kitchen stages.".to_string(),
             }),
             Node::Publisher(PublisherNode {
-                id: "publisher-prep".to_string(),
-                title: "Kitchen starts prep".to_string(),
+                id: "publisher-service".to_string(),
+                title: "Dish service".to_string(),
                 last_pulse: 0,
-                position_x: 360,
-                position_y: 740,
-                address: "cafe/kitchen/orders/order-17/prepping".to_string(),
-                payload_text: "{\n  \"orderId\": \"order-17\",\n  \"station\": \"hot line\",\n  \"chef\": \"Ivy\"\n}".to_string(),
+                position_x: CAFE_PUBLISHER_START_X + CAFE_PUBLISHER_COLUMN_STEP * 2,
+                position_y: CAFE_PUBLISHER_START_Y + CAFE_PUBLISHER_ROW_STEP * 2,
+                address: "cafe/tables/table-01/served".to_string(),
+                payload_text: "{\n  \"tableId\": \"table-01\",\n  \"customerId\": \"customer-001\",\n  \"orderId\": \"order-01\",\n  \"dishId\": \"ramen\",\n  \"waiterId\": \"waiter-1\"\n}".to_string(),
                 signal_kind: "Event".to_string(),
                 custom_signal_kind: String::new(),
                 metadata: SignalMetadata::default(),
-                note: "The kitchen acknowledges the ticket and starts cooking.".to_string(),
+                note: "Carries ready dishes from the kitchen pass to the customer via a waiter.".to_string(),
             }),
             Node::Publisher(PublisherNode {
-                id: "publisher-ready".to_string(),
-                title: "Kitchen marks ready".to_string(),
+                id: "publisher-diner".to_string(),
+                title: "Customer events".to_string(),
                 last_pulse: 0,
-                position_x: 660,
-                position_y: 740,
-                address: "cafe/kitchen/orders/order-17/ready".to_string(),
-                payload_text: "{\n  \"orderId\": \"order-17\",\n  \"runner\": \"Ivy\",\n  \"pass\": \"hot line\"\n}".to_string(),
+                position_x: CAFE_PUBLISHER_START_X + CAFE_PUBLISHER_COLUMN_STEP * 3,
+                position_y: CAFE_PUBLISHER_START_Y + CAFE_PUBLISHER_ROW_STEP * 2,
+                address: "cafe/orders/order-01/requested".to_string(),
+                payload_text: "{\n  \"customerId\": \"customer-001\",\n  \"tableId\": \"table-01\",\n  \"orderId\": \"order-01\",\n  \"dishId\": \"ramen\"\n}".to_string(),
                 signal_kind: "Event".to_string(),
                 custom_signal_kind: String::new(),
                 metadata: SignalMetadata::default(),
-                note: "Food is ready to leave the pass.".to_string(),
+                note: "Represents diner-driven events such as order readiness and bill requests.".to_string(),
             }),
             Node::Publisher(PublisherNode {
-                id: "publisher-serve".to_string(),
-                title: "Waiter serves food".to_string(),
+                id: "publisher-billing".to_string(),
+                title: "Billing and payment".to_string(),
                 last_pulse: 0,
-                position_x: 60,
-                position_y: 1050,
-                address: "cafe/tables/7/served".to_string(),
-                payload_text: "{\n  \"tableId\": \"7\",\n  \"orderId\": \"order-17\",\n  \"waiter\": \"Mira\"\n}".to_string(),
+                position_x: CAFE_PUBLISHER_START_X,
+                position_y: CAFE_PUBLISHER_START_Y + CAFE_PUBLISHER_ROW_STEP * 3,
+                address: "cafe/billing/table-01/presented".to_string(),
+                payload_text: "{\n  \"customerId\": \"customer-001\",\n  \"tableId\": \"table-01\",\n  \"subtotal\": 18.5,\n  \"billWaitMs\": 1200\n}".to_string(),
                 signal_kind: "Event".to_string(),
                 custom_signal_kind: String::new(),
                 metadata: SignalMetadata::default(),
-                note: "The plate reaches the table and the meal begins.".to_string(),
+                note: "Publishes bill presentation and payment payloads.".to_string(),
             }),
             Node::Publisher(PublisherNode {
-                id: "publisher-bill-request".to_string(),
-                title: "Alice asks for bill".to_string(),
+                id: "publisher-turnover".to_string(),
+                title: "Table turnover".to_string(),
                 last_pulse: 0,
-                position_x: 360,
-                position_y: 1050,
-                address: "cafe/tables/7/bill-requested".to_string(),
-                payload_text: "{\n  \"tableId\": \"7\",\n  \"customerId\": \"alice\",\n  \"waiter\": \"Mira\"\n}".to_string(),
+                position_x: CAFE_PUBLISHER_START_X + CAFE_PUBLISHER_COLUMN_STEP,
+                position_y: CAFE_PUBLISHER_START_Y + CAFE_PUBLISHER_ROW_STEP * 3,
+                address: "cafe/tables/table-01/cleared".to_string(),
+                payload_text: "{\n  \"tableId\": \"table-01\",\n  \"readyForNextParty\": true\n}".to_string(),
                 signal_kind: "Event".to_string(),
                 custom_signal_kind: String::new(),
                 metadata: SignalMetadata::default(),
-                note: "Alice signals that she is ready to pay.".to_string(),
+                note: "Frees tables for the next party after payment clears.".to_string(),
             }),
             Node::Publisher(PublisherNode {
-                id: "publisher-bill".to_string(),
-                title: "Waiter delivers bill".to_string(),
+                id: "publisher-departures".to_string(),
+                title: "Customer departure".to_string(),
                 last_pulse: 0,
-                position_x: 660,
-                position_y: 1050,
-                address: "cafe/tables/7/bill-delivered".to_string(),
-                payload_text: "{\n  \"tableId\": \"7\",\n  \"subtotal\": 18.50,\n  \"serviceCharge\": 2.50,\n  \"currency\": \"USD\"\n}".to_string(),
+                position_x: CAFE_PUBLISHER_START_X + CAFE_PUBLISHER_COLUMN_STEP * 2,
+                position_y: CAFE_PUBLISHER_START_Y + CAFE_PUBLISHER_ROW_STEP * 3,
+                address: "cafe/customers/customer-001/departed".to_string(),
+                payload_text: "{\n  \"customerId\": \"customer-001\",\n  \"tableId\": \"table-01\",\n  \"total\": 21.5,\n  \"tip\": 3.0\n}".to_string(),
                 signal_kind: "Event".to_string(),
                 custom_signal_kind: String::new(),
                 metadata: SignalMetadata::default(),
-                note: "The bill arrives after the waiter checks the table.".to_string(),
-            }),
-            Node::Publisher(PublisherNode {
-                id: "publisher-pay".to_string(),
-                title: "Alice pays".to_string(),
-                last_pulse: 0,
-                position_x: 60,
-                position_y: 1360,
-                address: "cafe/tables/7/paid".to_string(),
-                payload_text: "{\n  \"tableId\": \"7\",\n  \"total\": 21.00,\n  \"method\": \"card\"\n}".to_string(),
-                signal_kind: "Event".to_string(),
-                custom_signal_kind: String::new(),
-                metadata: SignalMetadata::default(),
-                note: "Alice settles the check and gets ready to leave.".to_string(),
-            }),
-            Node::Publisher(PublisherNode {
-                id: "publisher-clear".to_string(),
-                title: "Host clears table".to_string(),
-                last_pulse: 0,
-                position_x: 360,
-                position_y: 1360,
-                address: "cafe/tables/7/cleared".to_string(),
-                payload_text: "{\n  \"tableId\": \"7\",\n  \"readyForNextParty\": true\n}".to_string(),
-                signal_kind: "Event".to_string(),
-                custom_signal_kind: String::new(),
-                metadata: SignalMetadata::default(),
-                note: "The table is reset so Bob can be seated next.".to_string(),
-            }),
-            Node::Publisher(PublisherNode {
-                id: "publisher-seat-bob".to_string(),
-                title: "Host seats Bob".to_string(),
-                last_pulse: 0,
-                position_x: 660,
-                position_y: 1360,
-                address: "cafe/tables/7/seated".to_string(),
-                payload_text: "{\n  \"tableId\": \"7\",\n  \"customerId\": \"bob\",\n  \"waiter\": \"Mira\"\n}".to_string(),
-                signal_kind: "Event".to_string(),
-                custom_signal_kind: String::new(),
-                metadata: SignalMetadata::default(),
-                note: "Bob finally gets the open table after the turnover.".to_string(),
+                note: "Final exit signal after payment and table turnover complete.".to_string(),
             }),
             Node::Subscriber(SubscriberNode {
-                id: "subscriber-host".to_string(),
-                title: "Host stand".to_string(),
+                id: "subscriber-front-door".to_string(),
+                title: "Front door intake".to_string(),
                 last_pulse: 0,
-                position_x: 980,
-                position_y: 120,
-                expression: "cafe/queue/customers/{customer_id}/arrived".to_string(),
-                schema_id: "cafe.queue.arrived.v1".to_string(),
+                position_x: CAFE_SUBSCRIBER_X,
+                position_y: CAFE_SUBSCRIBER_START_Y,
+                expression: "cafe/customers/{customer_id}/arrived".to_string(),
+                schema_id: "cafe.customer.arrived.v1".to_string(),
                 delivery: DeliveryOptionsDto::default(),
                 received: Vec::new(),
                 configuration_expression: String::new(),
                 queue_depth: 8,
-                note: "The host watches the queue and spots arriving parties.".to_string(),
+                note: "Accepts arrivals and hands them to the queue rules.".to_string(),
             }),
             Node::Subscriber(SubscriberNode {
-                id: "subscriber-waiter".to_string(),
-                title: "Waiter".to_string(),
+                id: "subscriber-queue".to_string(),
+                title: "Queue rules".to_string(),
                 last_pulse: 0,
-                position_x: 980,
-                position_y: 430,
+                position_x: CAFE_SUBSCRIBER_X,
+                position_y: CAFE_SUBSCRIBER_START_Y + CAFE_SUBSCRIBER_ROW_STEP,
+                expression: "cafe/queue/front/{customer_id}/*".to_string(),
+                schema_id: "cafe.queue.activity.v1".to_string(),
+                delivery: DeliveryOptionsDto::default(),
+                received: Vec::new(),
+                configuration_expression: String::new(),
+                queue_depth: 8,
+                note: "Tracks front-of-queue state, capacity, and rejections.".to_string(),
+            }),
+            Node::Subscriber(SubscriberNode {
+                id: "subscriber-router".to_string(),
+                title: "Service requests".to_string(),
+                last_pulse: 0,
+                position_x: CAFE_SUBSCRIBER_X,
+                position_y: CAFE_SUBSCRIBER_START_Y + CAFE_SUBSCRIBER_ROW_STEP * 2,
+                expression: "cafe/service/request/*".to_string(),
+                schema_id: "cafe.service.request.v1".to_string(),
+                delivery: DeliveryOptionsDto::default(),
+                received: Vec::new(),
+                configuration_expression: String::new(),
+                queue_depth: 8,
+                note: "Receives seating, menu, order, service, and bill requests.".to_string(),
+            }),
+            Node::Subscriber(SubscriberNode {
+                id: "subscriber-tables".to_string(),
+                title: "Dining room state".to_string(),
+                last_pulse: 0,
+                position_x: CAFE_SUBSCRIBER_X,
+                position_y: CAFE_SUBSCRIBER_START_Y + CAFE_SUBSCRIBER_ROW_STEP * 3,
                 expression: "cafe/tables/{table_id}/*".to_string(),
                 schema_id: "cafe.table.activity.v1".to_string(),
                 delivery: DeliveryOptionsDto::default(),
                 received: Vec::new(),
                 configuration_expression: String::new(),
                 queue_depth: 8,
-                note: "The waiter handles seating, service, billing, and turn-over.".to_string(),
+                note: "Tracks the 10-table pool, menu delivery, service, and turnover.".to_string(),
             }),
             Node::Subscriber(SubscriberNode {
-                id: "subscriber-kitchen".to_string(),
-                title: "Kitchen line".to_string(),
+                id: "subscriber-orders".to_string(),
+                title: "Order intake".to_string(),
                 last_pulse: 0,
-                position_x: 980,
-                position_y: 740,
+                position_x: CAFE_SUBSCRIBER_X,
+                position_y: CAFE_SUBSCRIBER_START_Y + CAFE_SUBSCRIBER_ROW_STEP * 4,
                 expression: "cafe/orders/{order_id}/*".to_string(),
                 schema_id: "cafe.order.activity.v1".to_string(),
                 delivery: DeliveryOptionsDto::default(),
                 received: Vec::new(),
                 configuration_expression: String::new(),
                 queue_depth: 8,
-                note: "The kitchen listens for orders and turn-around on the pass.".to_string(),
+                note: "Feeds kitchen work from diners that are ready to order.".to_string(),
             }),
             Node::Subscriber(SubscriberNode {
-                id: "subscriber-customer".to_string(),
-                title: "Alice at the table".to_string(),
+                id: "subscriber-kitchen".to_string(),
+                title: "Kitchen stages".to_string(),
                 last_pulse: 0,
-                position_x: 980,
-                position_y: 1050,
-                expression: "cafe/tables/{table_id}/*".to_string(),
-                schema_id: "cafe.table.activity.v1".to_string(),
+                position_x: CAFE_SUBSCRIBER_X + 320,
+                position_y: CAFE_SUBSCRIBER_START_Y + CAFE_SUBSCRIBER_ROW_STEP,
+                expression: "cafe/kitchen/orders/{order_id}/*".to_string(),
+                schema_id: "cafe.kitchen.activity.v1".to_string(),
                 delivery: DeliveryOptionsDto::default(),
                 received: Vec::new(),
                 configuration_expression: String::new(),
                 queue_depth: 8,
-                note: "Alice reacts to the menu, food, bill, and payment flow.".to_string(),
+                note: "Shows prep started, ready staged, and ready for service.".to_string(),
             }),
             Node::Subscriber(SubscriberNode {
-                id: "subscriber-bob".to_string(),
-                title: "Bob waiting".to_string(),
+                id: "subscriber-billing".to_string(),
+                title: "Billing queue".to_string(),
                 last_pulse: 0,
-                position_x: 980,
-                position_y: 1360,
-                expression: "cafe/queue/customers/{customer_id}/arrived".to_string(),
-                schema_id: "cafe.queue.arrived.v1".to_string(),
+                position_x: CAFE_SUBSCRIBER_X + 320,
+                position_y: CAFE_SUBSCRIBER_START_Y + CAFE_SUBSCRIBER_ROW_STEP * 2,
+                expression: "cafe/billing/{table_id}/*".to_string(),
+                schema_id: "cafe.billing.activity.v1".to_string(),
                 delivery: DeliveryOptionsDto::default(),
                 received: Vec::new(),
                 configuration_expression: String::new(),
                 queue_depth: 8,
-                note: "Bob stays in the queue until the table is turned over.".to_string(),
+                note: "Captures bill requests, bill delivery, payment, and tips.".to_string(),
             }),
             Node::Service(ServiceNode {
-                id: "service-table-board".to_string(),
-                title: "Table board".to_string(),
+                id: "service-menu-catalog".to_string(),
+                title: "Menu catalog".to_string(),
                 last_pulse: 0,
-                position_x: 1280,
-                position_y: 430,
-                address: "cafe/tables/board".to_string(),
-                service_name: "TableBoard".to_string(),
-                note: "A service node for the floor plan and table turnover state.".to_string(),
+                position_x: CAFE_SERVICE_X,
+                position_y: CAFE_SERVICE_START_Y,
+                address: "cafe/services/menu-catalog".to_string(),
+                service_name: "MenuCatalog".to_string(),
+                note: "Provides configurable dish price and prep-time metadata.".to_string(),
+            }),
+            Node::Service(ServiceNode {
+                id: "service-waiter-pool".to_string(),
+                title: "Waiter pool".to_string(),
+                last_pulse: 0,
+                position_x: CAFE_SERVICE_X,
+                position_y: CAFE_SERVICE_START_Y + CAFE_SERVICE_ROW_STEP,
+                address: "cafe/services/waiter-pool".to_string(),
+                service_name: "WaiterPool".to_string(),
+                note: "Represents the two-waiter allocator used by the client-side runner.".to_string(),
             }),
         ];
         Self {
+            scenario_id: "cafe-pipeline".to_string(),
             config,
             nodes,
             publish_history: Vec::new(),
@@ -544,6 +654,7 @@ impl AppState {
         let nodes = self.nodes.clone();
         let routes = compute_routes(&nodes, &self.config);
         Snapshot {
+            scenario_id: self.scenario_id.clone(),
             config: self.config.clone(),
             nodes,
             publish_history: self.publish_history.clone(),
@@ -561,7 +672,10 @@ fn next_publisher_position(state: &AppState) -> (i32, i32) {
         .count();
     let column = (index % 3) as i32;
     let row = (index / 3) as i32;
-    (60 + column * 300, 120 + row * 310)
+    (
+        CAFE_PUBLISHER_START_X + column * CAFE_PUBLISHER_COLUMN_STEP,
+        CAFE_PUBLISHER_START_Y + row * CAFE_PUBLISHER_ROW_STEP,
+    )
 }
 
 fn next_subscriber_position(state: &AppState) -> (i32, i32) {
@@ -570,7 +684,10 @@ fn next_subscriber_position(state: &AppState) -> (i32, i32) {
         .iter()
         .filter(|node| matches!(node, Node::Subscriber(_)))
         .count();
-    (980, 120 + index as i32 * 310)
+    (
+        CAFE_SUBSCRIBER_X,
+        CAFE_SUBSCRIBER_START_Y + index as i32 * CAFE_SUBSCRIBER_ROW_STEP,
+    )
 }
 
 fn next_service_position(state: &AppState) -> (i32, i32) {
@@ -579,11 +696,15 @@ fn next_service_position(state: &AppState) -> (i32, i32) {
         .iter()
         .filter(|node| matches!(node, Node::Service(_)))
         .count();
-    (1280, 120 + index as i32 * 220)
+    (
+        CAFE_SERVICE_X,
+        CAFE_SERVICE_START_Y + index as i32 * CAFE_SERVICE_ROW_STEP,
+    )
 }
 
 #[derive(Clone)]
 struct Snapshot {
+    scenario_id: String,
     config: ConfigNode,
     nodes: Vec<Node>,
     publish_history: Vec<PublishTrace>,
@@ -595,6 +716,7 @@ impl Snapshot {
     fn to_json(&self) -> String {
         let mut out = String::new();
         out.push('{');
+        write!(out, "\"scenarioId\":{},", json_string(&self.scenario_id)).unwrap();
         write!(out, "\"config\":{},", self.config.to_json()).unwrap();
         out.push_str("\"nodes\":[");
         for (index, node) in self.nodes.iter().enumerate() {
@@ -787,10 +909,16 @@ impl ConfigNode {
         if let Some(allow) = form.get("allow_catch_all") {
             self.allow_catch_all = allow == "true";
         }
-        if let Some(depth) = form.get("default_queue_depth").and_then(|value| value.parse::<usize>().ok()) {
+        if let Some(depth) = form
+            .get("default_queue_depth")
+            .and_then(|value| value.parse::<usize>().ok())
+        {
             self.default_queue_depth = depth;
         }
-        if let Some(depth) = form.get("recursion_depth").and_then(|value| value.parse::<usize>().ok()) {
+        if let Some(depth) = form
+            .get("recursion_depth")
+            .and_then(|value| value.parse::<usize>().ok())
+        {
             self.recursion_policy.max_causation_depth = depth;
         }
         if let Some(on_exceeded) = form.get("on_exceeded") {
@@ -913,8 +1041,7 @@ impl SubscriberNode {
         write!(
             out,
             ",\"type\":\"subscriber\",\"position\":{{\"x\":{},\"y\":{}}},\"data\":{{",
-            self.position_x,
-            self.position_y
+            self.position_x, self.position_y
         )
         .unwrap();
         write!(
@@ -956,7 +1083,10 @@ impl SubscriberNode {
         if let Some(schema_id) = form.get("schema_id") {
             self.schema_id = schema_id.clone();
         }
-        if let Some(queue_depth) = form.get("queue_depth").and_then(|value| value.parse::<usize>().ok()) {
+        if let Some(queue_depth) = form
+            .get("queue_depth")
+            .and_then(|value| value.parse::<usize>().ok())
+        {
             self.queue_depth = queue_depth;
             self.delivery.queue.max_depth = queue_depth;
         }
@@ -975,10 +1105,16 @@ impl SubscriberNode {
                 _ => OverflowPolicy::RejectPublish,
             };
         }
-        if let Some(debounce_ms) = form.get("debounce_ms").and_then(|value| value.parse::<u64>().ok()) {
+        if let Some(debounce_ms) = form
+            .get("debounce_ms")
+            .and_then(|value| value.parse::<u64>().ok())
+        {
             self.delivery.timing.debounce_ms = Some(debounce_ms);
         }
-        if let Some(throttle_ms) = form.get("throttle_ms").and_then(|value| value.parse::<u64>().ok()) {
+        if let Some(throttle_ms) = form
+            .get("throttle_ms")
+            .and_then(|value| value.parse::<u64>().ok())
+        {
             self.delivery.timing.throttle_ms = Some(throttle_ms);
         }
         if let Some(configuration_expression) = form.get("configuration_expression") {
@@ -1074,6 +1210,15 @@ impl Node {
             Node::Subscriber(node) => node.apply(form),
             Node::Config(node) => node.apply(form),
             Node::Service(node) => node.apply(form),
+        }
+    }
+
+    fn mark_pulse(&mut self, timestamp: u64) {
+        match self {
+            Node::Publisher(node) => node.last_pulse = timestamp,
+            Node::Subscriber(node) => node.last_pulse = timestamp,
+            Node::Config(node) => node.last_pulse = timestamp,
+            Node::Service(node) => node.last_pulse = timestamp,
         }
     }
 }
@@ -1172,7 +1317,10 @@ struct TimeoutPolicyDto {
 
 impl Default for TimeoutPolicyDto {
     fn default() -> Self {
-        Self { handler_timeout_ms: None, delivery_deadline_ms: None }
+        Self {
+            handler_timeout_ms: None,
+            delivery_deadline_ms: None,
+        }
     }
 }
 
@@ -1194,7 +1342,10 @@ struct RatePolicyDto {
 
 impl Default for RatePolicyDto {
     fn default() -> Self {
-        Self { max_per_second: None, burst: None }
+        Self {
+            max_per_second: None,
+            burst: None,
+        }
     }
 }
 
@@ -1216,7 +1367,10 @@ struct TimingPolicyDto {
 
 impl Default for TimingPolicyDto {
     fn default() -> Self {
-        Self { debounce_ms: None, throttle_ms: None }
+        Self {
+            debounce_ms: None,
+            throttle_ms: None,
+        }
     }
 }
 
@@ -1314,7 +1468,10 @@ impl RecursionPolicyDto {
     }
 }
 
-fn delivery_options_for_subscriber(node: &SubscriberNode, default_queue_depth: usize) -> DeliveryOptions {
+fn delivery_options_for_subscriber(
+    node: &SubscriberNode,
+    default_queue_depth: usize,
+) -> DeliveryOptions {
     let queue_depth = if node.queue_depth == 0 {
         default_queue_depth
     } else {
@@ -1341,7 +1498,13 @@ fn delivery_options_for_subscriber(node: &SubscriberNode, default_queue_depth: u
     }
 }
 
-fn trace_from_publish(state: &AppState, publisher: &PublisherNode, result: PublishResult) -> PublishTrace {
+fn trace_from_signal(
+    state: &AppState,
+    from_node_id: &str,
+    address: &str,
+    payload_text: &str,
+    result: PublishResult,
+) -> PublishTrace {
     let deliveries = state
         .nodes
         .iter()
@@ -1349,7 +1512,7 @@ fn trace_from_publish(state: &AppState, publisher: &PublisherNode, result: Publi
             Node::Subscriber(subscriber) => {
                 let Some(params) = match_and_capture(
                     &subscriber.expression,
-                    &publisher.address,
+                    address,
                     state.config.allow_catch_all,
                 ) else {
                     return None;
@@ -1358,7 +1521,7 @@ fn trace_from_publish(state: &AppState, publisher: &PublisherNode, result: Publi
                     subscriber_node_id: subscriber.id.clone(),
                     expression: subscriber.expression.clone(),
                     params,
-                    payload: publisher.payload_text.clone(),
+                    payload: payload_text.to_string(),
                     accepted: true,
                     reason: None,
                 })
@@ -1368,9 +1531,9 @@ fn trace_from_publish(state: &AppState, publisher: &PublisherNode, result: Publi
         .collect();
     PublishTrace {
         signal_id: result.signal_id.0,
-        from_node_id: publisher.id.clone(),
-        address: publisher.address.clone(),
-        payload: publisher.payload_text.clone(),
+        from_node_id: from_node_id.to_string(),
+        address: address.to_string(),
+        payload: payload_text.to_string(),
         matched_count: result.matched_subscribers,
         accepted_count: result.accepted_deliveries,
         rejected_count: result.rejected_deliveries,
@@ -1396,9 +1559,11 @@ fn compute_routes(nodes: &[Node], config: &ConfigNode) -> Vec<RouteEdge> {
         .collect();
     for publisher in publishers {
         for subscriber in subscribers.iter() {
-            if let Some(params) =
-                match_and_capture(&subscriber.expression, &publisher.address, config.allow_catch_all)
-            {
+            if let Some(params) = match_and_capture(
+                &subscriber.expression,
+                &publisher.address,
+                config.allow_catch_all,
+            ) {
                 edges.push(RouteEdge {
                     id: format!("{}-{}", publisher.id, subscriber.id),
                     source: publisher.id.clone(),
@@ -1426,7 +1591,10 @@ fn match_and_capture(
     capture_params(&expression, &address)
 }
 
-fn capture_params(expression: &AddressExpression, address: &Address) -> Option<HashMap<String, String>> {
+fn capture_params(
+    expression: &AddressExpression,
+    address: &Address,
+) -> Option<HashMap<String, String>> {
     use spine::ExpressionSegment;
 
     let mut out = HashMap::new();
@@ -1506,7 +1674,10 @@ fn record_delivery(
     };
     subscriber.received.insert(0, delivery);
     subscriber.received.truncate(8);
-    *state.publish_delivery_counts.entry(ctx.signal_id.0).or_insert(0) += 1;
+    *state
+        .publish_delivery_counts
+        .entry(ctx.signal_id.0)
+        .or_insert(0) += 1;
     let snapshot = state.snapshot();
     drop(state);
     update_cv.notify_all();
@@ -1544,7 +1715,9 @@ fn format_system_time(time: SystemTime) -> String {
 }
 
 fn opt_num(value: Option<u64>) -> String {
-    value.map(|value| value.to_string()).unwrap_or_else(|| "null".to_string())
+    value
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "null".to_string())
 }
 
 fn opt_string(value: Option<&str>) -> String {
@@ -1592,7 +1765,11 @@ fn handle_connection(runtime: Arc<Runtime>, mut stream: TcpStream) -> Result<(),
             break;
         }
     }
-    let header_end = buffer.windows(4).position(|window| window == b"\r\n\r\n").unwrap() + 4;
+    let header_end = buffer
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .unwrap()
+        + 4;
     let header_text = String::from_utf8_lossy(&buffer[..header_end]);
     let mut lines = header_text.lines();
     let request_line = lines.next().ok_or("missing request line")?;
@@ -1641,10 +1818,30 @@ fn route_request(
             let snapshot = runtime.update_config(&form)?;
             respond_json(stream, 200, &snapshot.to_json())
         }
+        ("POST", "/api/scenarios/load") => {
+            let form = parse_form(&body);
+            let scenario_id = form.get("scenarioId").ok_or("missing scenarioId")?.clone();
+            let snapshot = runtime.load_scenario(&scenario_id)?;
+            respond_json(stream, 200, &snapshot.to_json())
+        }
         ("POST", "/api/publish") => {
             let form = parse_form(&body);
-            let publisher_id = form.get("publisherId").ok_or("missing publisherId")?.clone();
+            let publisher_id = form
+                .get("publisherId")
+                .ok_or("missing publisherId")?
+                .clone();
             let snapshot = runtime.publish_from(&publisher_id)?;
+            respond_json(stream, 200, &snapshot.to_json())
+        }
+        ("POST", "/api/publish/custom") => {
+            let form = parse_form(&body);
+            let node_id = form.get("nodeId").ok_or("missing nodeId")?.clone();
+            let address = form.get("address").ok_or("missing address")?.clone();
+            let payload_text = form
+                .get("payloadText")
+                .ok_or("missing payloadText")?
+                .clone();
+            let snapshot = runtime.publish_signal(&node_id, address, payload_text)?;
             respond_json(stream, 200, &snapshot.to_json())
         }
         _ if method == "POST" && path.starts_with("/api/nodes/") => {
@@ -1670,12 +1867,16 @@ fn respond_json(stream: &mut TcpStream, status: u16, body: &str) -> Result<(), S
         body.as_bytes().len(),
         body
     );
-    stream.write_all(response.as_bytes()).map_err(|err| err.to_string())
+    stream
+        .write_all(response.as_bytes())
+        .map_err(|err| err.to_string())
 }
 
 fn respond_sse(runtime: Arc<Runtime>, stream: &mut TcpStream) -> Result<(), String> {
     let headers = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: keep-alive\r\n\r\n";
-    stream.write_all(headers.as_bytes()).map_err(|err| err.to_string())?;
+    stream
+        .write_all(headers.as_bytes())
+        .map_err(|err| err.to_string())?;
     let receiver = runtime.events.subscribe();
     let initial = runtime.json_state();
     stream

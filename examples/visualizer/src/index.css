@@ -36,7 +36,7 @@ body {
 }
 
 .field {
-  @apply w-full rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-sm text-slate-100 outline-none transition focus:border-cyan-400/70 focus:ring-2 focus:ring-cyan-400/20;
+  @apply w-full rounded-xl border border-white/10 bg-white/5 px-2.5 py-2 text-[13px] text-slate-100 outline-none transition focus:border-cyan-400/70 focus:ring-2 focus:ring-cyan-400/20;
 }
 
 .label {
@@ -44,17 +44,75 @@ body {
 }
 
 .chip {
-  @apply inline-flex items-center rounded-full border border-white/10 bg-white/5 px-2.5 py-1 text-[11px] font-medium text-slate-200;
+  @apply inline-flex items-center rounded-full border border-white/10 bg-white/5 px-2 py-0.5 text-[10px] font-medium text-slate-200;
 }
 
 .glass-button {
-  @apply inline-flex items-center justify-center rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-sm font-medium text-slate-100 transition hover:border-cyan-400/50 hover:bg-cyan-400/10;
+  @apply inline-flex items-center justify-center rounded-xl border border-white/10 bg-white/5 px-2.5 py-1.5 text-[13px] font-medium text-slate-100 transition hover:border-cyan-400/50 hover:bg-cyan-400/10;
 }
 
 .accent-button {
-  @apply inline-flex items-center justify-center rounded-xl bg-cyan-400 px-3 py-2 text-sm font-semibold text-slate-950 transition hover:bg-cyan-300;
+  @apply inline-flex items-center justify-center rounded-xl bg-cyan-400 px-2.5 py-1.5 text-[13px] font-semibold text-slate-950 transition hover:bg-cyan-300;
 }
 
 .muted-button {
-  @apply inline-flex items-center justify-center rounded-xl border border-white/10 bg-slate-900/70 px-3 py-2 text-sm text-slate-200 transition hover:border-white/20 hover:bg-slate-800;
+  @apply inline-flex items-center justify-center rounded-xl border border-white/10 bg-slate-900/70 px-2.5 py-1.5 text-[13px] text-slate-200 transition hover:border-white/20 hover:bg-slate-800;
+}
+
+.flow-controls {
+  @apply overflow-hidden rounded-2xl border border-white/10 bg-slate-950/85 shadow-2xl backdrop-blur-xl;
+}
+
+.flow-controls .react-flow__controls-button {
+  @apply !border-b !border-white/10 !bg-slate-950/90 !text-slate-200 transition hover:!bg-cyan-400/10 hover:!text-cyan-100;
+  width: 34px;
+  height: 34px;
+}
+
+.flow-controls .react-flow__controls-button:last-child {
+  @apply !border-b-0;
+}
+
+.flow-controls .react-flow__controls-button svg {
+  fill: currentColor;
+}
+
+.flow-minimap {
+  @apply overflow-hidden rounded-2xl border border-white/10 bg-slate-950/85 shadow-2xl backdrop-blur-xl;
+}
+
+.flow-minimap svg {
+  @apply !bg-slate-950/85;
+}
+
+.flow-minimap .react-flow__minimap-mask {
+  fill: rgba(5, 8, 22, 0.76);
+}
+
+.flow-minimap .react-flow__minimap-node {
+  stroke-width: 3px;
+}
+
+.accent-range {
+  @apply h-2 w-full cursor-pointer appearance-none rounded-full bg-white/10;
+}
+
+.accent-range::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 18px;
+  height: 18px;
+  border-radius: 9999px;
+  background: #22d3ee;
+  border: 2px solid #082f49;
+  box-shadow: 0 0 0 4px rgba(34, 211, 238, 0.18);
+}
+
+.accent-range::-moz-range-thumb {
+  width: 18px;
+  height: 18px;
+  border-radius: 9999px;
+  background: #22d3ee;
+  border: 2px solid #082f49;
+  box-shadow: 0 0 0 4px rgba(34, 211, 238, 0.18);
 }

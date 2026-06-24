@@ -19,6 +19,7 @@ export interface RouteEdge {
 }
 
 export interface BackendSnapshot {
+  scenarioId: string;
   config: ConfigNodeData;
   nodes: Node<DemoNodeData>[];
   publishHistory: PublishTrace[];
@@ -171,10 +172,24 @@ export async function updateConfig(patch: ConfigPatch) {
   });
 }
 
+export async function loadScenario(scenarioId: string) {
+  return requestJson<BackendSnapshot>("/scenarios/load", {
+    method: "POST",
+    body: encodeForm({ scenarioId }),
+  });
+}
+
 export async function publishFromPublisher(publisherId: string) {
   return requestJson<BackendSnapshot>("/publish", {
     method: "POST",
     body: encodeForm({ publisherId }),
+  });
+}
+
+export async function publishCustomSignal(nodeId: string, address: string, payloadText: string) {
+  return requestJson<BackendSnapshot>("/publish/custom", {
+    method: "POST",
+    body: encodeForm({ nodeId, address, payloadText }),
   });
 }
 

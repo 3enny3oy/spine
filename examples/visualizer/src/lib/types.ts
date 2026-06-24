@@ -121,6 +121,10 @@ export type NodeBase = {
   title: string;
   lastPulse: number;
   note?: string;
+  isActive?: boolean;
+  activityLabel?: string;
+  activityValue?: string;
+  activityTone?: "sent" | "received" | "service" | "dropped";
 };
 
 export interface PublisherNodeData extends NodeBase {
@@ -141,6 +145,8 @@ export interface SubscriberNodeData extends NodeBase {
   received: DeliveryTrace[];
   configurationExpression: string;
   queueDepth: number;
+  queueLabel?: string;
+  queueItems?: string[];
 }
 
 export interface ConfigNodeData extends NodeBase {
@@ -154,6 +160,8 @@ export interface ServiceNodeData extends NodeBase {
   kind: "service";
   address: string;
   serviceName: string;
+  queueLabel?: string;
+  queueItems?: string[];
 }
 
 export type DemoNodeData =
