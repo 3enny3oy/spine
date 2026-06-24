@@ -1,10 +1,8 @@
 import type { Node } from "@xyflow/react";
 import type { DemoNodeData } from "./types";
 
-export type ScenarioId = "blank" | "cafe-pipeline";
-
 export interface ScenarioOption {
-  id: ScenarioId;
+  id: string;
   title: string;
   description: string;
   supportsSimulation: boolean;
@@ -16,21 +14,17 @@ export interface ScenarioEdgeDefinition {
   target: string;
 }
 
+export interface ScenarioDefinition extends ScenarioOption {
+  edges: ScenarioEdgeDefinition[];
+  simulationKind?: string | null;
+  cafeConfig?: CafeScenarioConfig | null;
+}
+
 export interface ScenarioEdgeData {
   lane: number;
   active?: boolean;
   label?: string;
   orientation?: "row" | "wrap";
-}
-
-export interface ScenarioNodePlacement {
-  column: number;
-  row: number;
-}
-
-export interface ScenarioGraphDefinition {
-  placements: Record<string, ScenarioNodePlacement>;
-  edges: ScenarioEdgeDefinition[];
 }
 
 export interface CafeDishConfig {
@@ -81,21 +75,6 @@ export interface CafeQueueSnapshot {
   activeTables: string[];
 }
 
-export const SCENARIO_OPTIONS: ScenarioOption[] = [
-  {
-    id: "cafe-pipeline",
-    title: "Cafe pipeline",
-    description: "Queue, waiter pool, kitchen stages, billing, and turnover driven through the bus.",
-    supportsSimulation: true,
-  },
-  {
-    id: "blank",
-    title: "Blank canvas",
-    description: "Empty workspace with only the shared bus configuration node.",
-    supportsSimulation: false,
-  },
-];
-
 export const DEFAULT_CAFE_METRICS: CafeMetrics = {
   customersSeen: 0,
   queued: 0,
@@ -117,7 +96,7 @@ export const DEFAULT_CAFE_QUEUE_SNAPSHOT: CafeQueueSnapshot = {
   activeTables: [],
 };
 
-export const DEFAULT_CAFE_SCENARIO_CONFIG: CafeScenarioConfig = {
+export const FALLBACK_CAFE_SCENARIO_CONFIG: CafeScenarioConfig = {
   arrivalMinMs: 1200,
   arrivalMaxMs: 2600,
   queueCapacity: 12,
@@ -157,65 +136,6 @@ export const CAFE_NODE_IDS = {
   departures: "publisher-departures",
 } as const;
 
-export const SCENARIO_GRAPHS: Record<ScenarioId, ScenarioGraphDefinition> = {
-  blank: {
-    placements: {
-      "config-1": { column: 0, row: 0 },
-    },
-    edges: [],
-  },
-  "cafe-pipeline": {
-    placements: {
-      "config-1": { column: 0, row: 0 },
-      "publisher-arrivals": { column: 0, row: 1 },
-      "subscriber-front-door": { column: 1, row: 1 },
-      "publisher-queue": { column: 2, row: 1 },
-      "subscriber-queue": { column: 3, row: 1 },
-      "publisher-concierge": { column: 4, row: 1 },
-      "publisher-waiter-router": { column: 5, row: 1 },
-      "subscriber-router": { column: 6, row: 1 },
-      "service-waiter-pool": { column: 7, row: 1 },
-      "publisher-seating": { column: 0, row: 3 },
-      "subscriber-tables": { column: 1, row: 3 },
-      "publisher-menu": { column: 2, row: 3 },
-      "service-menu-catalog": { column: 3, row: 3 },
-      "publisher-diner": { column: 4, row: 3 },
-      "publisher-order": { column: 5, row: 3 },
-      "subscriber-orders": { column: 6, row: 3 },
-      "publisher-kitchen": { column: 0, row: 5 },
-      "subscriber-kitchen": { column: 1, row: 5 },
-      "publisher-service": { column: 2, row: 5 },
-      "publisher-billing": { column: 3, row: 5 },
-      "subscriber-billing": { column: 4, row: 5 },
-      "publisher-turnover": { column: 5, row: 5 },
-      "publisher-departures": { column: 6, row: 5 },
-    },
-    edges: [
-      { id: "arrivals-front-door", source: "publisher-arrivals", target: "subscriber-front-door" },
-      { id: "front-door-queue", source: "subscriber-front-door", target: "publisher-queue" },
-      { id: "queue-queue-rules", source: "publisher-queue", target: "subscriber-queue" },
-      { id: "queue-concierge", source: "subscriber-queue", target: "publisher-concierge" },
-      { id: "concierge-router", source: "publisher-concierge", target: "publisher-waiter-router" },
-      { id: "router-requests", source: "publisher-waiter-router", target: "subscriber-router" },
-      { id: "requests-waiter-pool", source: "subscriber-router", target: "service-waiter-pool" },
-      { id: "waiter-pool-seating", source: "service-waiter-pool", target: "publisher-seating" },
-      { id: "seating-tables", source: "publisher-seating", target: "subscriber-tables" },
-      { id: "tables-menu", source: "subscriber-tables", target: "publisher-menu" },
-      { id: "menu-catalog", source: "publisher-menu", target: "service-menu-catalog" },
-      { id: "catalog-diner", source: "service-menu-catalog", target: "publisher-diner" },
-      { id: "diner-order", source: "publisher-diner", target: "publisher-order" },
-      { id: "order-intake", source: "publisher-order", target: "subscriber-orders" },
-      { id: "orders-kitchen", source: "subscriber-orders", target: "publisher-kitchen" },
-      { id: "kitchen-stages", source: "publisher-kitchen", target: "subscriber-kitchen" },
-      { id: "kitchen-service", source: "subscriber-kitchen", target: "publisher-service" },
-      { id: "service-billing", source: "publisher-service", target: "publisher-billing" },
-      { id: "billing-queue", source: "publisher-billing", target: "subscriber-billing" },
-      { id: "billing-turnover", source: "subscriber-billing", target: "publisher-turnover" },
-      { id: "turnover-departures", source: "publisher-turnover", target: "publisher-departures" },
-    ],
-  },
-};
-
 export function cloneCafeConfig(config: CafeScenarioConfig): CafeScenarioConfig {
   return {
     ...config,
@@ -223,46 +143,15 @@ export function cloneCafeConfig(config: CafeScenarioConfig): CafeScenarioConfig 
   };
 }
 
-export function layoutNodesForScenario<T extends { id: string; position: { x: number; y: number } }>(
-  scenarioId: ScenarioId,
-  nodes: T[],
-): T[] {
-  const definition = SCENARIO_GRAPHS[scenarioId];
-  if (!definition) {
-    return nodes;
-  }
-  const columnWidth = 320;
-  const rowHeight = 260;
-  const startX = 80;
-  const startY = 80;
-  return nodes.map((node) => {
-    const placement = definition.placements[node.id];
-    if (!placement) {
-      return node;
-    }
-    return {
-      ...node,
-      position: {
-        x: startX + placement.column * columnWidth,
-        y: startY + placement.row * rowHeight,
-      },
-    };
-  });
-}
-
 export function scenarioEdgesForNodes(
-  scenarioId: ScenarioId,
+  edges: ScenarioEdgeDefinition[],
   nodes: Array<{ id: string; position: { x: number; y: number } }>,
   activeMessages?: Map<string, string>,
 ) {
-  const definition = SCENARIO_GRAPHS[scenarioId];
-  if (!definition) {
-    return [];
-  }
   const nodeMap = new Map(nodes.map((node) => [node.id, node]));
   const groups = new Map<string, number>();
 
-  return definition.edges
+  return edges
     .filter((edge) => nodeMap.has(edge.source) && nodeMap.has(edge.target))
     .map((edge) => {
       const source = nodeMap.get(edge.source)!;

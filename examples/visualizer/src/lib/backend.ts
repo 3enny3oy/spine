@@ -6,6 +6,7 @@ import type {
   DeliveryTrace,
   PublishTrace,
 } from "./types";
+import type { ScenarioDefinition, ScenarioOption } from "./scenarios";
 
 const API_ROOT = "/api";
 
@@ -20,6 +21,7 @@ export interface RouteEdge {
 
 export interface BackendSnapshot {
   scenarioId: string;
+  scenario: ScenarioDefinition;
   config: ConfigNodeData;
   nodes: Node<DemoNodeData>[];
   publishHistory: PublishTrace[];
@@ -174,6 +176,17 @@ export async function updateConfig(patch: ConfigPatch) {
 
 export async function loadScenario(scenarioId: string) {
   return requestJson<BackendSnapshot>("/scenarios/load", {
+    method: "POST",
+    body: encodeForm({ scenarioId }),
+  });
+}
+
+export async function loadScenarioCatalog() {
+  return requestJson<ScenarioOption[]>("/scenarios", { method: "GET" });
+}
+
+export async function saveScenario(scenarioId: string) {
+  return requestJson<BackendSnapshot>("/scenarios/save", {
     method: "POST",
     body: encodeForm({ scenarioId }),
   });

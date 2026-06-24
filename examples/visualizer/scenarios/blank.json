@@ -1,0 +1,23 @@
+{
+  "id": "blank",
+  "title": "Blank canvas",
+  "description": "Empty workspace with only the shared bus configuration node.",
+  "supportsSimulation": false,
+  "config": {
+    "id": "config-1",
+    "title": "Bus Config",
+    "position": {
+      "x": 80,
+      "y": 80
+    },
+    "allowCatchAll": false,
+    "defaultQueueDepth": 1024,
+    "recursionPolicy": {
+      "maxCausationDepth": 32,
+      "onExceeded": "RejectPublish"
+    },
+    "note": "Global delivery controls"
+  },
+  "nodes": [],
+  "edges": []
+}

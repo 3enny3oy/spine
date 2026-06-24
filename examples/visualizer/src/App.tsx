@@ -17,9 +17,11 @@ import { InspectorDialog } from "./components/InspectorDialog";
 import {
   createNode,
   loadScenario,
+  loadScenarioCatalog,
   loadSnapshot,
   publishCustomSignal,
   publishFromPublisher,
+  saveScenario,
   subscribeSnapshots,
   updateConfig,
   updateNode,
@@ -35,16 +37,14 @@ import {
 import {
   cloneCafeConfig,
   decorateScenarioNodesWithCafeQueues,
-  DEFAULT_CAFE_SCENARIO_CONFIG,
   DEFAULT_CAFE_QUEUE_SNAPSHOT,
-  layoutNodesForScenario,
+  FALLBACK_CAFE_SCENARIO_CONFIG,
   scenarioEdgesForNodes,
-  SCENARIO_OPTIONS,
   type CafeDishConfig,
   type CafeMetrics,
   type CafeQueueSnapshot,
   type CafeScenarioConfig,
-  type ScenarioId,
+  type ScenarioOption,
 } from "./lib/scenarios";
 import type { ConfigNodeData, DemoNodeData, DeliveryTrace, PublishTrace } from "./lib/types";
 
@@ -71,12 +71,14 @@ export function App() {
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [backendState, setBackendState] = useState<"connecting" | "live" | "offline">("connecting");
   const [requestError, setRequestError] = useState<string | null>(null);
-  const [selectedScenarioId, setSelectedScenarioId] = useState<ScenarioId>("cafe-pipeline");
+  const [scenarioOptions, setScenarioOptions] = useState<ScenarioOption[]>([]);
+  const [selectedScenarioId, setSelectedScenarioId] = useState("cafe-pipeline");
   const [loadingScenario, setLoadingScenario] = useState(false);
+  const [savingScenario, setSavingScenario] = useState(false);
   const [simulationRunning, setSimulationRunning] = useState(false);
   const [simulationSpeed, setSimulationSpeed] = useState(1);
   const [layoutRevision, setLayoutRevision] = useState(0);
-  const [cafeConfig, setCafeConfig] = useState<CafeScenarioConfig>(() => cloneCafeConfig(DEFAULT_CAFE_SCENARIO_CONFIG));
+  const [cafeConfig, setCafeConfig] = useState<CafeScenarioConfig>(() => cloneCafeConfig(FALLBACK_CAFE_SCENARIO_CONFIG));
   const cafeConfigRef = useRef(cafeConfig);
   const [cafeMetrics, setCafeMetrics] = useState<CafeMetrics>(() => resetCafeMetrics());
   const [cafeQueues, setCafeQueues] = useState<CafeQueueSnapshot>(() => ({ ...DEFAULT_CAFE_QUEUE_SNAPSHOT }));
@@ -94,18 +96,21 @@ export function App() {
   const applySnapshot = useCallback(
     (next: BackendSnapshot) => {
       const currentSnapshot = snapshotRef.current;
-      const shouldRelayout = forceLayoutRef.current || currentSnapshot?.scenarioId !== next.scenarioId;
+      const scenarioChanged = currentSnapshot?.scenarioId !== next.scenarioId;
+      const shouldRelayout = forceLayoutRef.current || scenarioChanged;
       if (isStaleSnapshot(currentSnapshot, next)) {
         return;
       }
       snapshotRef.current = next;
       setSnapshot(next);
-      setSelectedScenarioId(next.scenarioId as ScenarioId);
+      setSelectedScenarioId(next.scenarioId);
+      setScenarioOptions((current) => upsertScenarioOption(current, next.scenario));
+      if (scenarioChanged) {
+        setCafeConfig(cloneCafeConfig(next.scenario.cafeConfig ?? FALLBACK_CAFE_SCENARIO_CONFIG));
+      }
       setNodes((current) => {
         const decorated = decorateSnapshotNodes(next, cafeQueuesRef.current);
-        return shouldRelayout
-          ? layoutNodesForScenario(next.scenarioId as ScenarioId, decorated)
-          : mergeNodes(current, decorated);
+        return shouldRelayout ? decorated : mergeNodes(current, decorated);
       });
       setSelectedNodeId((current) => (current && next.nodes.some((node) => node.id === current) ? current : null));
       setRequestError(next.lastError);
@@ -126,6 +131,18 @@ export function App() {
 
   useEffect(() => {
     let cancelled = false;
+
+    loadScenarioCatalog()
+      .then((options) => {
+        if (!cancelled) {
+          setScenarioOptions(options);
+        }
+      })
+      .catch((error) => {
+        if (!cancelled) {
+          setRequestError(error instanceof Error ? error.message : "Failed to load scenarios");
+        }
+      });
 
     loadSnapshot()
       .then((next) => {
@@ -204,14 +221,18 @@ export function App() {
   const sidebarTrace = publishHistory[0] ?? null;
   const errorMessage = requestError ?? snapshot?.lastError ?? null;
   const nodeTitles = useMemo(() => new Map(nodes.map((node) => [node.id, node.data.title])), [nodes]);
-  const activeScenario = SCENARIO_OPTIONS.find((scenario) => scenario.id === selectedScenarioId) ?? SCENARIO_OPTIONS[0];
-  const supportsCafeSimulation = selectedScenarioId === "cafe-pipeline";
+  const activeScenario =
+    (snapshot?.scenarioId === selectedScenarioId ? snapshot.scenario : null) ??
+    scenarioOptions.find((scenario) => scenario.id === selectedScenarioId) ??
+    scenarioOptions[0] ??
+    null;
+  const supportsCafeSimulation = snapshot?.scenario.simulationKind === "cafe-pipeline";
   const activeEdgeMessages = useMemo(() => buildActiveEdgeMessages(snapshot), [snapshot]);
 
   const flowEdges = useMemo(
     () =>
       scenarioEdgesForNodes(
-        selectedScenarioId,
+        snapshot?.scenario.edges ?? [],
         nodes.map((node) => ({ id: node.id, position: node.position })),
         activeEdgeMessages,
       ).map((edge) => ({
@@ -222,7 +243,7 @@ export function App() {
           strokeWidth: edge.data?.active ? 3.2 : 2.5,
         },
       })),
-    [activeEdgeMessages, nodes, selectedScenarioId],
+    [activeEdgeMessages, nodes, snapshot?.scenario.edges],
   );
 
   async function publishNode(nodeId: string) {
@@ -276,7 +297,7 @@ export function App() {
     }
   }
 
-  async function handleLoadScenario(scenarioId: ScenarioId) {
+  async function handleLoadScenario(scenarioId: string) {
     setLoadingScenario(true);
     publishEpochRef.current += 1;
     simulationRef.current?.stop();
@@ -294,6 +315,19 @@ export function App() {
       setRequestError(error instanceof Error ? error.message : "Failed to load scenario");
     } finally {
       setLoadingScenario(false);
+    }
+  }
+
+  async function handleSaveScenario() {
+    setSavingScenario(true);
+    try {
+      const next = await saveScenario(selectedScenarioId);
+      applySnapshot(next);
+      setRequestError(null);
+    } catch (error) {
+      setRequestError(error instanceof Error ? error.message : "Failed to save scenario");
+    } finally {
+      setSavingScenario(false);
     }
   }
 
@@ -319,7 +353,7 @@ export function App() {
   }
 
   function handleResetCafeConfig() {
-    setCafeConfig(cloneCafeConfig(DEFAULT_CAFE_SCENARIO_CONFIG));
+    setCafeConfig(cloneCafeConfig(snapshot?.scenario.cafeConfig ?? FALLBACK_CAFE_SCENARIO_CONFIG));
   }
 
   return (
@@ -344,7 +378,7 @@ export function App() {
               <MenuButton className="glass-button" store={menuStore}>
                 Add node
               </MenuButton>
-              <div className="chip">scenario: {activeScenario.title}</div>
+              <div className="chip">scenario: {activeScenario?.title ?? selectedScenarioId}</div>
               <div className="chip">backend: {backendState}</div>
               <div className="chip">nodes: {nodes.length}</div>
               <div className="chip">process edges: {flowEdges.length}</div>
@@ -405,9 +439,6 @@ export function App() {
                 <MenuItem className="glass-button mt-1 w-full justify-start" onClick={() => handleAddNode("subscriber")}>
                   Subscriber node
                 </MenuItem>
-                <MenuItem className="glass-button mt-1 w-full justify-start" onClick={() => handleAddNode("config")}>
-                  Config node
-                </MenuItem>
                 <MenuItem className="glass-button mt-1 w-full justify-start" onClick={() => handleAddNode("service")}>
                   Service node
                 </MenuItem>
@@ -422,7 +453,9 @@ export function App() {
               <div className="text-xs font-semibold uppercase tracking-[0.25em] text-slate-400">
                 Scenario controls
               </div>
-              <div className="mt-1 text-[13px] leading-5 text-slate-300">{activeScenario.description}</div>
+              <div className="mt-1 text-[13px] leading-5 text-slate-300">
+                {activeScenario?.description ?? "Load a saved scenario to inspect the bus graph."}
+              </div>
             </div>
 
             <div className="min-h-0 flex-1 space-y-3 overflow-auto p-3">
@@ -432,10 +465,10 @@ export function App() {
                   <select
                     className="field"
                     value={selectedScenarioId}
-                    onChange={(event) => void handleLoadScenario(event.target.value as ScenarioId)}
+                    onChange={(event) => void handleLoadScenario(event.target.value)}
                     disabled={loadingScenario}
                   >
-                    {SCENARIO_OPTIONS.map((scenario) => (
+                    {scenarioOptions.map((scenario) => (
                       <option key={scenario.id} value={scenario.id}>
                         {scenario.title}
                       </option>
@@ -446,7 +479,7 @@ export function App() {
                   <button
                     className="accent-button w-full"
                     onClick={handleStartPipeline}
-                    disabled={!activeScenario.supportsSimulation || simulationRunning || loadingScenario}
+                    disabled={!supportsCafeSimulation || simulationRunning || loadingScenario}
                   >
                     Run pipeline
                   </button>
@@ -458,6 +491,9 @@ export function App() {
                   </button>
                   <button className="glass-button w-full" onClick={() => void handleLoadScenario(selectedScenarioId)} disabled={loadingScenario}>
                     Reload scenario
+                  </button>
+                  <button className="glass-button w-full" onClick={() => void handleSaveScenario()} disabled={loadingScenario || savingScenario}>
+                    Save JSON
                   </button>
                   <button className="glass-button w-full" onClick={() => setSelectedNodeId(config?.id ?? null)} disabled={!config}>
                     Bus config
@@ -623,6 +659,20 @@ function mergeNodes(current: Node<DemoNodeData>[], next: Node<DemoNodeData>[]): 
   return merged;
 }
 
+function upsertScenarioOption(current: ScenarioOption[], scenario: BackendSnapshot["scenario"]): ScenarioOption[] {
+  const option = {
+    id: scenario.id,
+    title: scenario.title,
+    description: scenario.description,
+    supportsSimulation: scenario.supportsSimulation,
+  };
+  const existing = current.findIndex((item) => item.id === option.id);
+  if (existing === -1) {
+    return [...current, option].sort((left, right) => left.title.localeCompare(right.title));
+  }
+  return current.map((item, index) => (index === existing ? option : item));
+}
+
 function isStaleSnapshot(current: BackendSnapshot | null, next: BackendSnapshot) {
   if (!current || current.scenarioId !== next.scenarioId) {
     return false;
@@ -643,7 +693,7 @@ function decorateSnapshotNodes(
   cafeQueues: CafeQueueSnapshot,
 ): Node<DemoNodeData>[] {
   const withActivity = decorateScenarioNodesWithActivity(snapshot.nodes, snapshot);
-  if (snapshot.scenarioId !== "cafe-pipeline") {
+  if (snapshot.scenario.simulationKind !== "cafe-pipeline") {
     return withActivity;
   }
   return decorateScenarioNodesWithCafeQueues(withActivity, cafeQueues);
