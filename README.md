@@ -75,3 +75,7 @@ The test suite covers parsing, matching, specificity ordering, selective deliver
 - [Architecture](docs/architecture.md)
 - [Routing Logic](docs/routing-logic.md)
 - [Specification](SPEC.md)
+
+## Examples
+
+- [Interactive visualizer](examples/visualizer/README.md) with the browser UI driving the Rust backend
