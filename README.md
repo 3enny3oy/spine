@@ -1,2 +1,2 @@
 # spine
-Embedded Signal Address Bus
+SPINE — Signal Pathway for Internal Notification and Exchange
