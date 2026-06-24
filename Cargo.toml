@@ -1,0 +1,25 @@
+[package]
+name = "spine"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Embedded in-process signal address bus"
+
+[features]
+default = ["std", "async"]
+std = []
+async = []
+serde = []
+json-schema = ["serde"]
+tracing = []
+metrics = []
+parking-lot = []
+arc-swap = []
+
+[lib]
+name = "spine"
+path = "src/lib.rs"
+
+[[bench]]
+name = "basic"
+harness = false
