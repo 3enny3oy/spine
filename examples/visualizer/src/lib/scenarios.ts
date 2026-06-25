@@ -10,6 +10,7 @@ import type {
   ResourcePoolPrimitiveConfig,
   SourcePrimitiveConfig,
   StorePrimitiveConfig,
+  NodePort,
   TimerPrimitiveConfig,
   WorkerBatchPolicyConfig,
   WorkerPrimitiveConfig,
@@ -32,7 +33,21 @@ export interface ScenarioDefinition extends ScenarioOption {
   edges: ScenarioEdgeDefinition[];
   simulationKind?: string | null;
   cafeConfig?: CafeScenarioConfig | null;
+  visualGroups?: ScenarioVisualGroupDefinition[] | null;
   blueprint?: SimulationBlueprintDefinition | null;
+}
+
+export interface ScenarioVisualGroupDefinition {
+  id: string;
+  title: string;
+  position: BlueprintNodePosition;
+  size: {
+    width: number;
+    height: number;
+  };
+  nodeIds: string[];
+  note?: string;
+  tone?: string | null;
 }
 
 export interface SimulationBlueprintDefinition {
@@ -127,11 +142,21 @@ export interface BlueprintEdgeDefinition {
 }
 
 export interface ScenarioEdgeData {
-  lane: number;
-  laneCount: number;
   active?: boolean;
   label?: string;
-  orientation?: "row" | "wrap";
+}
+
+export interface ScenarioGraphVisuals {
+  edges: Array<{
+    id: string;
+    source: string;
+    target: string;
+    sourceHandle: string;
+    targetHandle: string;
+    type: "scenarioManhattan";
+    data: ScenarioEdgeData;
+  }>;
+  portsByNodeId: Map<string, NodePort[]>;
 }
 
 export interface CafeDishConfig {
@@ -540,51 +565,256 @@ export function scenarioEdgesForNodes(
   edges: ScenarioEdgeDefinition[],
   nodes: Array<{ id: string; position: { x: number; y: number } }>,
   activeMessages?: Map<string, string>,
-) {
+): ScenarioGraphVisuals {
   const nodeMap = new Map(nodes.map((node) => [node.id, node]));
-  const descriptors = edges
-    .filter((edge) => nodeMap.has(edge.source) && nodeMap.has(edge.target))
-    .map((edge) => {
-      const source = nodeMap.get(edge.source)!;
-      const target = nodeMap.get(edge.target)!;
-      const sameRow = Math.abs(source.position.y - target.position.y) < 2;
-      const corridorId = sameRow
-        ? `row:${source.position.x}->${target.position.x}@${source.position.y}`
-        : `wrap:${source.position.x}->${target.position.x}@${Math.round((source.position.y + target.position.y) / 2)}`;
-      return {
-        edge,
-        corridorId,
-        orientation: sameRow ? ("row" as const) : ("wrap" as const),
-      };
-    });
+  const visibleEdges = edges.filter((edge) => nodeMap.has(edge.source) && nodeMap.has(edge.target));
+  const portsByNodeId = new Map<string, NodePort[]>();
+  const sourceHandleByEdgeId = new Map<string, string>();
+  const targetHandleByEdgeId = new Map<string, string>();
+  const outgoingByNode = new Map<
+    string,
+    Array<{ edge: ScenarioEdgeDefinition; counterpartY: number }>
+  >();
+  const incomingByNode = new Map<
+    string,
+    Array<{ edge: ScenarioEdgeDefinition; counterpartY: number }>
+  >();
 
-  const laneCounts = new Map<string, number>();
-  for (const descriptor of descriptors) {
-    laneCounts.set(descriptor.corridorId, (laneCounts.get(descriptor.corridorId) ?? 0) + 1);
+  for (const edge of visibleEdges) {
+    const sourceGroup = outgoingByNode.get(edge.source) ?? [];
+    sourceGroup.push({
+      edge,
+      counterpartY: nodeMap.get(edge.target)?.position.y ?? 0,
+    });
+    outgoingByNode.set(edge.source, sourceGroup);
+
+    const targetGroup = incomingByNode.get(edge.target) ?? [];
+    targetGroup.push({
+      edge,
+      counterpartY: nodeMap.get(edge.source)?.position.y ?? 0,
+    });
+    incomingByNode.set(edge.target, targetGroup);
   }
 
-  const lanesSeen = new Map<string, number>();
-
-  return descriptors.map(({ edge, corridorId, orientation }) => {
-      const lane = lanesSeen.get(corridorId) ?? 0;
-      lanesSeen.set(corridorId, lane + 1);
-
-      return {
-        id: edge.id,
-        source: edge.source,
-        target: edge.target,
-        sourceHandle: "right",
-        targetHandle: "left",
-        type: "scenarioManhattan" as const,
-        data: {
-          lane,
-          laneCount: laneCounts.get(corridorId) ?? 1,
-          active: activeMessages?.has(`${edge.source}->${edge.target}`) ?? false,
-          label: activeMessages?.get(`${edge.source}->${edge.target}`),
-          orientation,
-        },
-      };
+  for (const [nodeId, group] of outgoingByNode) {
+    const ordered = [...group].sort(
+      (left, right) => left.counterpartY - right.counterpartY || left.edge.id.localeCompare(right.edge.id),
+    );
+    ordered.forEach(({ edge }, index) => {
+      const handleId = `source-${edge.id}`;
+      sourceHandleByEdgeId.set(edge.id, handleId);
+      pushNodePort(portsByNodeId, nodeId, {
+        id: handleId,
+        side: "right",
+        offset: distributePortOffset(index, ordered.length),
+      });
     });
+  }
+
+  for (const [nodeId, group] of incomingByNode) {
+    const ordered = [...group].sort(
+      (left, right) => left.counterpartY - right.counterpartY || left.edge.id.localeCompare(right.edge.id),
+    );
+    ordered.forEach(({ edge }, index) => {
+      const handleId = `target-${edge.id}`;
+      targetHandleByEdgeId.set(edge.id, handleId);
+      pushNodePort(portsByNodeId, nodeId, {
+        id: handleId,
+        side: "left",
+        offset: distributePortOffset(index, ordered.length),
+      });
+    });
+  }
+
+  return {
+    portsByNodeId,
+    edges: visibleEdges.map((edge) => ({
+      id: edge.id,
+      source: edge.source,
+      target: edge.target,
+      sourceHandle: sourceHandleByEdgeId.get(edge.id) ?? "right",
+      targetHandle: targetHandleByEdgeId.get(edge.id) ?? "left",
+      type: "scenarioManhattan" as const,
+      data: {
+        active: activeMessages?.has(`${edge.source}->${edge.target}`) ?? false,
+        label: activeMessages?.get(`${edge.source}->${edge.target}`),
+      },
+    })),
+  };
+}
+
+function distributePortOffset(index: number, count: number) {
+  if (count <= 1) {
+    return 50;
+  }
+
+  const minOffset = 20;
+  const maxOffset = 80;
+  return minOffset + ((maxOffset - minOffset) * index) / (count - 1);
+}
+
+function pushNodePort(portsByNodeId: Map<string, NodePort[]>, nodeId: string, port: NodePort) {
+  const ports = portsByNodeId.get(nodeId) ?? [];
+  ports.push(port);
+  portsByNodeId.set(nodeId, ports);
+}
+
+export function materializeScenarioVisualGroups(
+  scenario: ScenarioDefinition | null | undefined,
+  nodes: Node<DemoNodeData>[],
+): Node<DemoNodeData>[] {
+  const groups = scenario?.visualGroups ?? [];
+  if (!groups.length) {
+    return nodes;
+  }
+
+  const GROUP_PADDING_X = 44;
+  const GROUP_PADDING_TOP = 88;
+  const GROUP_PADDING_BOTTOM = 40;
+
+  const nodeIds = new Set(nodes.map((node) => node.id));
+  const groupByNodeId = new Map<string, ScenarioVisualGroupDefinition>();
+  for (const group of groups) {
+    for (const nodeId of group.nodeIds) {
+      if (!nodeIds.has(nodeId) || groupByNodeId.has(nodeId)) {
+        continue;
+      }
+      groupByNodeId.set(nodeId, group);
+    }
+  }
+
+  const boundsByGroupId = new Map<
+    string,
+    { x: number; y: number; width: number; height: number }
+  >();
+
+  for (const group of groups) {
+    const memberNodes = nodes.filter((node) => group.nodeIds.includes(node.id));
+    if (!memberNodes.length) {
+      boundsByGroupId.set(group.id, {
+        x: group.position.x,
+        y: group.position.y,
+        width: group.size.width,
+        height: group.size.height,
+      });
+      continue;
+    }
+
+    const memberBounds = memberNodes.reduce(
+      (bounds, node) => {
+        const { width, height } = estimateNodeFootprint(node.data);
+        return {
+          minX: Math.min(bounds.minX, node.position.x),
+          minY: Math.min(bounds.minY, node.position.y),
+          maxX: Math.max(bounds.maxX, node.position.x + width),
+          maxY: Math.max(bounds.maxY, node.position.y + height),
+        };
+      },
+      {
+        minX: Number.POSITIVE_INFINITY,
+        minY: Number.POSITIVE_INFINITY,
+        maxX: Number.NEGATIVE_INFINITY,
+        maxY: Number.NEGATIVE_INFINITY,
+      },
+    );
+
+    const groupX = Math.min(group.position.x, memberBounds.minX - GROUP_PADDING_X);
+    const groupY = Math.min(group.position.y, memberBounds.minY - GROUP_PADDING_TOP);
+    const groupMaxX = Math.max(group.position.x + group.size.width, memberBounds.maxX + GROUP_PADDING_X);
+    const groupMaxY = Math.max(group.position.y + group.size.height, memberBounds.maxY + GROUP_PADDING_BOTTOM);
+
+    boundsByGroupId.set(group.id, {
+      x: groupX,
+      y: groupY,
+      width: groupMaxX - groupX,
+      height: groupMaxY - groupY,
+    });
+  }
+
+  const parentNodes = groups.map<Node<DemoNodeData>>((group) => {
+    const bounds = boundsByGroupId.get(group.id) ?? {
+      x: group.position.x,
+      y: group.position.y,
+      width: group.size.width,
+      height: group.size.height,
+    };
+
+    return {
+      id: group.id,
+      type: "scenarioGroup",
+      position: {
+        x: bounds.x,
+        y: bounds.y,
+      },
+      draggable: true,
+      selectable: true,
+      connectable: false,
+      deletable: false,
+      data: {
+        id: group.id,
+        kind: "group",
+        title: group.title,
+        lastPulse: 0,
+        note: group.note,
+        tone: group.tone ?? undefined,
+        isActive: false,
+      },
+      style: {
+        width: bounds.width,
+        height: bounds.height,
+      },
+    };
+  });
+
+  const topLevelNodes: Node<DemoNodeData>[] = [];
+  const childNodes: Node<DemoNodeData>[] = [];
+
+  for (const node of nodes) {
+    const group = groupByNodeId.get(node.id);
+    if (!group) {
+      topLevelNodes.push({
+        ...node,
+        parentId: undefined,
+        extent: undefined,
+      });
+      continue;
+    }
+
+    const bounds = boundsByGroupId.get(group.id) ?? {
+      x: group.position.x,
+      y: group.position.y,
+    };
+
+    childNodes.push({
+      ...node,
+      position: {
+        x: node.position.x - bounds.x,
+        y: node.position.y - bounds.y,
+      },
+      parentId: group.id,
+      // ELK owns compound-node geometry. Constraining children to the parent
+      // causes React Flow to clamp them against layouted bounds and can
+      // collapse the render tree once live updates start changing measurements.
+      extent: undefined,
+    });
+  }
+
+  return [...parentNodes, ...topLevelNodes, ...childNodes];
+}
+
+function estimateNodeFootprint(node: DemoNodeData) {
+  switch (node.kind) {
+    case "publisher":
+      return { width: 250, height: 228 };
+    case "subscriber":
+      return { width: 250, height: 278 };
+    case "service":
+      return { width: 250, height: 254 };
+    case "config":
+      return { width: 250, height: 176 };
+    default:
+      return { width: 250, height: 200 };
+  }
 }
 
 export function decorateNodesWithCafeQueues(

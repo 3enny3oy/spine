@@ -41,6 +41,7 @@ struct ScenarioState {
     edges: Vec<ScenarioEdgeDefinition>,
     simulation_kind: Option<String>,
     cafe_config: Option<CafeScenarioConfig>,
+    visual_groups: Vec<ScenarioVisualGroupFile>,
     blueprint: Option<SimulationBlueprintFile>,
     #[serde(skip_serializing)]
     materialized_from_blueprint: bool,
@@ -73,6 +74,8 @@ struct ScenarioFile {
     #[serde(default)]
     cafe_config: Option<CafeScenarioConfig>,
     #[serde(default)]
+    visual_groups: Vec<ScenarioVisualGroupFile>,
+    #[serde(default)]
     blueprint: Option<SimulationBlueprintFile>,
     config: ScenarioConfigFile,
     #[serde(default)]
@@ -86,6 +89,28 @@ struct ScenarioFile {
 struct PositionFile {
     x: i32,
     y: i32,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SizeFile {
+    width: i32,
+    height: i32,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ScenarioVisualGroupFile {
+    id: String,
+    title: String,
+    position: PositionFile,
+    size: SizeFile,
+    #[serde(default)]
+    node_ids: Vec<String>,
+    #[serde(default)]
+    note: String,
+    #[serde(default)]
+    tone: Option<String>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -714,6 +739,7 @@ impl ScenarioFile {
                 edges: scenario_edges,
                 simulation_kind: self.simulation_kind,
                 cafe_config: self.cafe_config,
+                visual_groups: self.visual_groups,
                 blueprint: self.blueprint,
                 materialized_from_blueprint,
             },
@@ -732,6 +758,7 @@ impl ScenarioFile {
             supports_simulation: state.scenario.supports_simulation,
             simulation_kind: state.scenario.simulation_kind.clone(),
             cafe_config: state.scenario.cafe_config.clone(),
+            visual_groups: state.scenario.visual_groups.clone(),
             blueprint: state.scenario.blueprint.clone(),
             config: ScenarioConfigFile::from_runtime(&state.config),
             nodes: if state.scenario.materialized_from_blueprint {

@@ -31,6 +31,8 @@ Scenario presets now live in [`scenarios/`](./scenarios) as JSON. The Rust backe
 
 Scenarios can now be authored either with explicit runtime `nodes` or with a `blueprint` block that the backend expands into runtime nodes and visual edges when loaded. [`scenarios/cafe-blueprint.json`](./scenarios/cafe-blueprint.json) is the first blueprint-authored example.
 
+The current cafe runtime graph is also documented as Mermaid in [`docs/cafe-pipeline-flow.md`](./docs/cafe-pipeline-flow.md).
+
 ## What it shows
 
 - Scenario loading, so the frontend can reset the backend to a named graph preset

@@ -3,6 +3,7 @@ import {
   MiniMap,
   ReactFlow,
   ReactFlowProvider,
+  SelectionMode,
   useNodesInitialized,
   useNodesState,
   useReactFlow,
@@ -12,7 +13,7 @@ import {
 } from "@xyflow/react";
 import { Menu, MenuButton, MenuItem, useMenuStore } from "@ariakit/react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ConfigNode, PublisherNode, ServiceNode, SubscriberNode } from "./components/GraphNodes";
+import { ConfigNode, GroupNode, PublisherNode, ServiceNode, SubscriberNode } from "./components/GraphNodes";
 import { ScenarioManhattanEdge } from "./components/ScenarioManhattanEdge";
 import { InspectorDialog } from "./components/InspectorDialog";
 import {
@@ -40,6 +41,7 @@ import {
   decorateScenarioNodesWithCafeQueues,
   DEFAULT_CAFE_QUEUE_SNAPSHOT,
   FALLBACK_CAFE_SCENARIO_CONFIG,
+  materializeScenarioVisualGroups,
   resolveCafeSimulationRuntime,
   scenarioEdgesForNodes,
   type CafeDishConfig,
@@ -56,11 +58,15 @@ const nodeTypes = {
   subscriber: SubscriberNode,
   config: ConfigNode,
   service: ServiceNode,
+  scenarioGroup: GroupNode,
 };
 
 const edgeTypes = {
   scenarioManhattan: ScenarioManhattanEdge,
 };
+
+const GRAPH_MIN_ZOOM = 0.08;
+const GRAPH_FIT_PADDING = 0.14;
 
 export function App() {
   return (
@@ -74,6 +80,16 @@ function ScenarioVisualizer() {
   const [snapshot, setSnapshot] = useState<BackendSnapshot | null>(null);
   const snapshotRef = useRef<BackendSnapshot | null>(null);
   const reactFlowRef = useRef<ReactFlowInstance<Node<DemoNodeData>, Edge> | null>(null);
+  const displayNodeCacheRef = useRef(
+    new Map<
+      string,
+      {
+        sourceNode: Node<DemoNodeData>;
+        portsSignature: string;
+        displayNode: Node<DemoNodeData>;
+      }
+    >(),
+  );
   const simulationRef = useRef<CafeSimulationController | null>(null);
   const forceLayoutRef = useRef(false);
   const layoutRunRef = useRef(0);
@@ -148,7 +164,7 @@ function ScenarioVisualizer() {
         setPendingLayout((current) => (current?.revision === pendingLayout.revision ? null : current));
         queueMicrotask(() => {
           requestAnimationFrame(() => {
-            reactFlowRef.current?.fitView({ padding: 0.12, minZoom: 0.55, duration: 280 });
+            reactFlowRef.current?.fitView({ padding: GRAPH_FIT_PADDING, minZoom: GRAPH_MIN_ZOOM, duration: 280 });
           });
         });
       })
@@ -169,7 +185,8 @@ function ScenarioVisualizer() {
     (next: BackendSnapshot) => {
       const currentSnapshot = snapshotRef.current;
       const scenarioChanged = currentSnapshot?.scenarioId !== next.scenarioId;
-      const shouldRelayout = forceLayoutRef.current || scenarioChanged;
+      const topologyChanged = hasScenarioTopologyChanged(currentSnapshot, next);
+      const shouldRelayout = forceLayoutRef.current || scenarioChanged || topologyChanged;
       if (isStaleSnapshot(currentSnapshot, next)) {
         return;
       }
@@ -181,8 +198,10 @@ function ScenarioVisualizer() {
         setCafeConfig(cloneCafeConfig(next.scenario.cafeConfig ?? FALLBACK_CAFE_SCENARIO_CONFIG));
       }
       setNodes((current) => {
-        const decorated = decorateSnapshotNodes(next, cafeQueuesRef.current);
-        return shouldRelayout ? decorated : mergeNodes(current, decorated);
+        const decorated = decorateSnapshotRuntimeNodes(next, cafeQueuesRef.current);
+        return shouldRelayout
+          ? materializeScenarioVisualGroups(next.scenario, decorated)
+          : patchLiveSnapshotNodes(current, decorated);
       });
       setSelectedNodeId((current) => (current && next.nodes.some((node) => node.id === current) ? current : null));
       setRequestError(next.lastError);
@@ -297,13 +316,65 @@ function ScenarioVisualizer() {
   const supportsCafeSimulation = snapshot?.scenario.simulationKind === "cafe-pipeline";
   const activeEdgeMessages = useMemo(() => buildActiveEdgeMessages(snapshot), [snapshot]);
 
-  const flowEdges = useMemo(
+  const flowGraph = useMemo(
     () =>
       scenarioEdgesForNodes(
         snapshot?.scenario.edges ?? [],
-        nodes.map((node) => ({ id: node.id, position: node.position })),
+        buildAbsoluteNodePositions(nodes),
         activeEdgeMessages,
-      ).map((edge) => ({
+      ),
+    [activeEdgeMessages, nodes, snapshot?.scenario.edges],
+  );
+
+  const displayNodes = useMemo(
+    () => {
+      const nextCache = new Map<
+        string,
+        {
+          sourceNode: Node<DemoNodeData>;
+          portsSignature: string;
+          displayNode: Node<DemoNodeData>;
+        }
+      >();
+
+      const display = nodes.map((node) => {
+        const ports = node.data.kind === "group" ? undefined : flowGraph.portsByNodeId.get(node.id) ?? [];
+        const portsSignature = serializePorts(ports);
+        const cached = displayNodeCacheRef.current.get(node.id);
+
+        if (cached && cached.sourceNode === node && cached.portsSignature === portsSignature) {
+          nextCache.set(node.id, cached);
+          return cached.displayNode;
+        }
+
+        const displayNode =
+          node.data.kind === "group"
+            ? node
+            : {
+                ...node,
+                data: {
+                  ...node.data,
+                  ports,
+                },
+              };
+
+        nextCache.set(node.id, {
+          sourceNode: node,
+          portsSignature,
+          displayNode,
+        });
+        return displayNode;
+      });
+
+      displayNodeCacheRef.current = nextCache;
+      return display;
+    },
+    [flowGraph.portsByNodeId, nodes],
+  );
+
+  const flowEdges = useMemo(
+    () =>
+      flowGraph.edges.map((edge) => ({
         ...edge,
         animated: Boolean(edge.data?.active),
         style: {
@@ -311,7 +382,7 @@ function ScenarioVisualizer() {
           strokeWidth: edge.data?.active ? 3.2 : 2.5,
         },
       })),
-    [activeEdgeMessages, nodes, snapshot?.scenario.edges],
+    [flowGraph.edges],
   );
 
   async function publishNode(nodeId: string) {
@@ -321,7 +392,7 @@ function ScenarioVisualizer() {
     return next;
   }
 
-  async function handleAddNode(kind: DemoNodeData["kind"]) {
+  async function handleAddNode(kind: "publisher" | "subscriber" | "service") {
     try {
       const next = await createNode(kind);
       applySnapshot(next);
@@ -437,12 +508,18 @@ function ScenarioVisualizer() {
         <div className="absolute inset-0">
           <ReactFlow
             key={`${selectedScenarioId}-${layoutRevision}`}
-            nodes={nodes}
+            nodes={displayNodes}
             edges={flowEdges}
             nodeTypes={nodeTypes}
             edgeTypes={edgeTypes}
+            minZoom={GRAPH_MIN_ZOOM}
+            maxZoom={1.8}
+            selectionKeyCode="Shift"
+            selectionMode={SelectionMode.Partial}
+            multiSelectionKeyCode="Shift"
+            panOnDrag
             onNodesChange={onNodesChange}
-            onNodeClick={(_, node) => setSelectedNodeId(node.id)}
+            onNodeClick={(_, node) => setSelectedNodeId(node.data.kind === "group" ? null : node.id)}
             onPaneClick={() => setSelectedNodeId(null)}
             onInit={(instance) => {
               reactFlowRef.current = instance;
@@ -475,7 +552,7 @@ function ScenarioVisualizer() {
               </MenuButton>
               <div className="chip">scenario: {activeScenario?.title ?? selectedScenarioId}</div>
               <div className="chip">backend: {backendState}</div>
-              <div className="chip">nodes: {nodes.length}</div>
+              <div className="chip">nodes: {nodes.filter((node) => node.data.kind !== "group").length}</div>
               <div className="chip">edges: {flowEdges.length}</div>
               {supportsCafeSimulation ? <div className="chip">revenue: {formatMoney(cafeMetrics.revenue)}</div> : null}
             </div>
@@ -501,7 +578,9 @@ function ScenarioVisualizer() {
           <CanvasControls
             onZoomIn={() => void reactFlowRef.current?.zoomIn({ duration: 180 })}
             onZoomOut={() => void reactFlowRef.current?.zoomOut({ duration: 180 })}
-            onFitView={() => void reactFlowRef.current?.fitView({ padding: 0.14, minZoom: 0.55, duration: 220 })}
+            onFitView={() =>
+              void reactFlowRef.current?.fitView({ padding: GRAPH_FIT_PADDING, minZoom: GRAPH_MIN_ZOOM, duration: 220 })
+            }
           />
         </div>
 
@@ -511,7 +590,9 @@ function ScenarioVisualizer() {
               <div className="label">Map</div>
               <button
                 className="chip"
-                onClick={() => void reactFlowRef.current?.fitView({ padding: 0.14, minZoom: 0.55, duration: 220 })}
+                onClick={() =>
+                  void reactFlowRef.current?.fitView({ padding: GRAPH_FIT_PADDING, minZoom: GRAPH_MIN_ZOOM, duration: 220 })
+                }
               >
                 Fit
               </button>
@@ -530,11 +611,17 @@ function ScenarioVisualizer() {
                     return "rgba(192,132,252,0.9)";
                   case "service":
                     return "rgba(232,121,249,0.9)";
+                  case "scenarioGroup":
+                    return "rgba(148,163,184,0.35)";
                   default:
                     return "rgba(255,255,255,0.2)";
                 }
               }}
-              nodeColor={() => "rgba(15,23,42,0.75)"}
+              nodeColor={(node) =>
+                node.type === "scenarioGroup"
+                  ? "rgba(15,23,42,0.24)"
+                  : "rgba(15,23,42,0.75)"
+              }
             />
           </div>
         </div>
@@ -673,35 +760,75 @@ function ScenarioVisualizer() {
   );
 }
 
-function mergeNodes(current: Node<DemoNodeData>[], next: Node<DemoNodeData>[]): Node<DemoNodeData>[] {
-  const currentById = new Map(current.map((node) => [node.id, node]));
+function patchLiveSnapshotNodes(current: Node<DemoNodeData>[], next: Node<DemoNodeData>[]): Node<DemoNodeData>[] {
   const nextById = new Map(next.map((node) => [node.id, node]));
-  const merged: Node<DemoNodeData>[] = [];
-  const seen = new Set<string>();
+  let changed = false;
 
-  for (const node of current) {
+  const merged = current.map((node) => {
+    if (node.data.kind === "group") {
+      return node;
+    }
+
     const incoming = nextById.get(node.id);
-    if (incoming) {
-      merged.push({
-        ...incoming,
-        position: node.position,
-        selected: node.selected,
-        dragging: node.dragging,
-      });
-    } else {
-      merged.push(node);
+    if (!incoming) {
+      return node;
     }
-    seen.add(node.id);
+
+    if (areNodeDataEqual(node.data, incoming.data)) {
+      return node;
+    }
+
+    changed = true;
+    return {
+      ...node,
+      data: {
+        ...incoming.data,
+        ports: node.data.ports,
+      },
+    };
+  });
+
+  return changed ? merged : current;
+}
+
+function buildAbsoluteNodePositions(nodes: Node<DemoNodeData>[]) {
+  const nodesById = new Map(nodes.map((node) => [node.id, node]));
+  const absoluteById = new Map<string, { x: number; y: number }>();
+
+  function resolvePosition(node: Node<DemoNodeData>): { x: number; y: number } {
+    const cached = absoluteById.get(node.id);
+    if (cached) {
+      return cached;
+    }
+
+    if (!node.parentId) {
+      const absolute = { x: node.position.x, y: node.position.y };
+      absoluteById.set(node.id, absolute);
+      return absolute;
+    }
+
+    const parent = nodesById.get(node.parentId);
+    if (!parent) {
+      const absolute = { x: node.position.x, y: node.position.y };
+      absoluteById.set(node.id, absolute);
+      return absolute;
+    }
+
+    const parentPosition = resolvePosition(parent);
+    const absolute = {
+      x: parentPosition.x + node.position.x,
+      y: parentPosition.y + node.position.y,
+    };
+    absoluteById.set(node.id, absolute);
+    return absolute;
   }
 
-  for (const node of next) {
-    if (seen.has(node.id)) {
-      continue;
-    }
-    merged.push(node);
-  }
-
-  return merged;
+  return nodes
+    .filter((node) => node.data.kind !== "group")
+    .map((node) => ({
+      id: node.id,
+      position: resolvePosition(node),
+    }));
 }
 
 function upsertScenarioOption(current: ScenarioOption[], scenario: BackendSnapshot["scenario"]): ScenarioOption[] {
@@ -733,15 +860,89 @@ function isStaleSnapshot(current: BackendSnapshot | null, next: BackendSnapshot)
   return nextSignalId < currentSignalId;
 }
 
-function decorateSnapshotNodes(
+function decorateSnapshotRuntimeNodes(
   snapshot: BackendSnapshot,
   cafeQueues: CafeQueueSnapshot,
 ): Node<DemoNodeData>[] {
   const withActivity = decorateScenarioNodesWithActivity(snapshot.nodes, snapshot);
-  if (snapshot.scenario.simulationKind !== "cafe-pipeline") {
-    return withActivity;
+  return snapshot.scenario.simulationKind === "cafe-pipeline"
+    ? decorateScenarioNodesWithCafeQueues(withActivity, cafeQueues)
+    : withActivity;
+}
+
+function hasScenarioTopologyChanged(current: BackendSnapshot | null, next: BackendSnapshot) {
+  if (!current || current.scenarioId !== next.scenarioId) {
+    return false;
   }
-  return decorateScenarioNodesWithCafeQueues(withActivity, cafeQueues);
+
+  return (
+    !haveSameNodeIds(current.nodes, next.nodes) ||
+    !haveSameEdges(current.scenario.edges, next.scenario.edges) ||
+    !haveSameVisualGroups(current.scenario.visualGroups ?? [], next.scenario.visualGroups ?? [])
+  );
+}
+
+function haveSameNodeIds(current: Node<DemoNodeData>[], next: Node<DemoNodeData>[]) {
+  if (current.length !== next.length) {
+    return false;
+  }
+
+  const nextIds = new Set(next.map((node) => node.id));
+  return current.every((node) => nextIds.has(node.id));
+}
+
+function haveSameEdges(
+  current: BackendSnapshot["scenario"]["edges"],
+  next: BackendSnapshot["scenario"]["edges"],
+) {
+  if (current.length !== next.length) {
+    return false;
+  }
+
+  const currentById = new Map(current.map((edge) => [edge.id, `${edge.source}->${edge.target}`]));
+  return next.every((edge) => currentById.get(edge.id) === `${edge.source}->${edge.target}`);
+}
+
+function haveSameVisualGroups(
+  current: NonNullable<BackendSnapshot["scenario"]["visualGroups"]>,
+  next: NonNullable<BackendSnapshot["scenario"]["visualGroups"]>,
+) {
+  if (current.length !== next.length) {
+    return false;
+  }
+
+  const currentById = new Map(
+    current.map((group) => [group.id, group.nodeIds.slice().sort().join("|")]),
+  );
+  return next.every((group) => currentById.get(group.id) === group.nodeIds.slice().sort().join("|"));
+}
+
+function areNodeDataEqual(current: DemoNodeData, next: DemoNodeData) {
+  return JSON.stringify(stripPorts(current)) === JSON.stringify(stripPorts(next));
+}
+
+function stripPorts(data: DemoNodeData) {
+  const { ports: _ports, ...rest } = data;
+  return rest;
+}
+
+function serializePorts(ports?: DemoNodeData["ports"]) {
+  if (!ports?.length) {
+    return "";
+  }
+
+  return ports.map((port) => `${port.id}:${port.side}:${port.offset}`).join("|");
+}
+
+function decorateSnapshotNodes(
+  snapshot: BackendSnapshot,
+  cafeQueues: CafeQueueSnapshot,
+): Node<DemoNodeData>[] {
+  const baseNodes =
+    snapshot.scenario.simulationKind === "cafe-pipeline"
+      ? decorateScenarioNodesWithCafeQueues(decorateScenarioNodesWithActivity(snapshot.nodes, snapshot), cafeQueues)
+      : decorateScenarioNodesWithActivity(snapshot.nodes, snapshot);
+  return materializeScenarioVisualGroups(snapshot.scenario, baseNodes);
 }
 
 function decorateScenarioNodesWithActivity(

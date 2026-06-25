@@ -11,9 +11,6 @@ importers:
       '@ariakit/react':
         specifier: ^0.4.17
         version: 0.4.30(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
-      '@tisoap/react-flow-smart-edge':
-        specifier: ^4.11.1
-        version: 4.11.1(@xyflow/react@12.11.1(@types/react-dom@19.2.3(@types/react@19.2.17))(@types/react@19.2.17)(react-dom@19.2.7(react@19.2.7))(react@19.2.7))(react-dom@19.2.7(react@19.2.7))(react@19.2.7)(typescript@5.9.3)
       '@xyflow/react':
         specifier: ^12.8.5
         version: 12.11.1(@types/react-dom@19.2.3(@types/react@19.2.17))(@types/react@19.2.17)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
@@ -580,14 +577,6 @@ packages:
     resolution: {integrity: sha512-hItDHuIIlEV61R+faXu66s1K36aTurO/Qw0e45Vskz57gXl9pWOT6eg3zmcEui6CZXddbN7zd41bwmvag4JGwQ==}
     peerDependencies:
       vite: ^5.2.0 || ^6 || ^7 || ^8
-
-  '@tisoap/react-flow-smart-edge@4.11.1':
-    resolution: {integrity: sha512-XwMwQQ1AGVO5fQyRt+e1CQwUhyolB93CnxX80nXVf4y3XOJpLkE5+oSdnq24NVOPpNfl+ciAcnjEJsReHFXpXg==}
-    peerDependencies:
-      '@xyflow/react': '>=12'
-      react: '>=18'
-      react-dom: '>=18'
-      typescript: '>=5'
 
   '@types/babel__core@7.20.5':
     resolution: {integrity: sha512-qoQprZvz5wQFJwMDqeseRXWv3rqMvhgpbXFfVyWhbx9X47POIA6i/+dXefEmZKoAgOaTdaIgNSMqMIU61yRyzA==}
@@ -1407,13 +1396,6 @@ snapshots:
       '@tailwindcss/oxide': 4.3.1
       tailwindcss: 4.3.1
       vite: 6.4.3(jiti@2.7.0)(lightningcss@1.32.0)
-
-  '@tisoap/react-flow-smart-edge@4.11.1(@xyflow/react@12.11.1(@types/react-dom@19.2.3(@types/react@19.2.17))(@types/react@19.2.17)(react-dom@19.2.7(react@19.2.7))(react@19.2.7))(react-dom@19.2.7(react@19.2.7))(react@19.2.7)(typescript@5.9.3)':
-    dependencies:
-      '@xyflow/react': 12.11.1(@types/react-dom@19.2.3(@types/react@19.2.17))(@types/react@19.2.17)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
-      react: 19.2.7
-      react-dom: 19.2.7(react@19.2.7)
-      typescript: 5.9.3
 
   '@types/babel__core@7.20.5':
     dependencies:

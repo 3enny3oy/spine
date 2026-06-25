@@ -1,4 +1,4 @@
-export type NodeKind = "publisher" | "subscriber" | "config" | "service";
+export type NodeKind = "publisher" | "subscriber" | "config" | "service" | "group";
 export type PrimitiveType =
   | "source"
   | "queue"
@@ -254,6 +254,12 @@ export interface SignalMetadata {
   contentType?: string;
 }
 
+export interface NodePort {
+  id: string;
+  side: "left" | "right";
+  offset: number;
+}
+
 export type NodeBase = {
   id: string;
   kind: NodeKind;
@@ -264,6 +270,7 @@ export type NodeBase = {
   activityLabel?: string;
   activityValue?: string;
   activityTone?: "sent" | "received" | "service" | "dropped";
+  ports?: NodePort[];
 } & PrimitiveMetadata;
 
 export interface PublisherNodeData extends NodeBase {
@@ -303,11 +310,17 @@ export interface ServiceNodeData extends NodeBase {
   queueItems?: string[];
 }
 
+export interface GroupNodeData extends NodeBase {
+  kind: "group";
+  tone?: string;
+}
+
 export type DemoNodeData =
   | PublisherNodeData
   | SubscriberNodeData
   | ConfigNodeData
-  | ServiceNodeData;
+  | ServiceNodeData
+  | GroupNodeData;
 
 export interface MatchRecord {
   subscriberNodeId: string;

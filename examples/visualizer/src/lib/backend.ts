@@ -116,6 +116,8 @@ function encodeNode(node: DemoNodeData): string {
         address: node.address,
         service_name: node.serviceName,
       });
+    case "group":
+      throw new Error("group nodes are visual-only and cannot be persisted through the backend");
   }
 }
 

@@ -42,6 +42,90 @@
       }
     ]
   },
+  "visualGroups": [
+    {
+      "id": "group-front-door",
+      "title": "Front Door Queue",
+      "position": { "x": 40, "y": 180 },
+      "size": { "width": 1580, "height": 230 },
+      "nodeIds": [
+        "publisher-arrivals",
+        "subscriber-front-door",
+        "publisher-queue",
+        "subscriber-queue"
+      ],
+      "note": "Arrival intake, queue admission, capacity checks, and front-of-line state.",
+      "tone": "cyan"
+    },
+    {
+      "id": "group-dispatch",
+      "title": "Dispatch And Shared Services",
+      "position": { "x": 1730, "y": 180 },
+      "size": { "width": 1610, "height": 460 },
+      "nodeIds": [
+        "publisher-concierge",
+        "service-menu-catalog",
+        "publisher-diner",
+        "publisher-waiter-router",
+        "subscriber-router",
+        "service-waiter-pool"
+      ],
+      "note": "Concierge handoff, customer timing, waiter dispatch, shared lookup services, and section ownership.",
+      "tone": "violet"
+    },
+    {
+      "id": "group-tables",
+      "title": "Table Intake",
+      "position": { "x": 900, "y": 740 },
+      "size": { "width": 760, "height": 220 },
+      "nodeIds": [
+        "publisher-seating",
+        "subscriber-tables"
+      ],
+      "note": "Seating parties and tracking table occupancy, ownership, and readiness.",
+      "tone": "emerald"
+    },
+    {
+      "id": "group-service",
+      "title": "Waiter Service Loop",
+      "position": { "x": 1730, "y": 740 },
+      "size": { "width": 1210, "height": 560 },
+      "nodeIds": [
+        "publisher-menu",
+        "publisher-order",
+        "subscriber-orders",
+        "publisher-service",
+        "publisher-billing",
+        "subscriber-billing"
+      ],
+      "note": "Menu delivery, order capture, service runs, billing, and payment collection at the tables.",
+      "tone": "emerald"
+    },
+    {
+      "id": "group-kitchen",
+      "title": "Kitchen",
+      "position": { "x": 2180, "y": 1380 },
+      "size": { "width": 760, "height": 220 },
+      "nodeIds": [
+        "publisher-kitchen",
+        "subscriber-kitchen"
+      ],
+      "note": "Ticket admission, batching, prep progress, and ready-for-service output.",
+      "tone": "amber"
+    },
+    {
+      "id": "group-turnover",
+      "title": "Exit And Turnover",
+      "position": { "x": 3040, "y": 1040 },
+      "size": { "width": 910, "height": 220 },
+      "nodeIds": [
+        "publisher-turnover",
+        "publisher-departures"
+      ],
+      "note": "Clearing the table and finalizing the completed visit.",
+      "tone": "rose"
+    }
+  ],
   "config": {
     "id": "config-1",
     "title": "Bus Config",
