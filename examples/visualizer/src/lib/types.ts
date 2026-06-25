@@ -1,4 +1,143 @@
 export type NodeKind = "publisher" | "subscriber" | "config" | "service";
+export type PrimitiveType =
+  | "source"
+  | "queue"
+  | "worker"
+  | "timer"
+  | "store"
+  | "resource_pool"
+  | "router"
+  | "scheduler"
+  | "transform"
+  | "observer"
+  | (string & {});
+
+export type JsonPrimitive = string | number | boolean | null;
+export type JsonValue = JsonPrimitive | JsonObject | JsonValue[];
+export interface JsonObject {
+  [key: string]: JsonValue;
+}
+
+export type KnownPrimitiveType =
+  | "source"
+  | "queue"
+  | "worker"
+  | "timer"
+  | "store"
+  | "resource_pool";
+
+export interface RangeConfig extends JsonObject {
+  min?: number;
+  max?: number;
+}
+
+export interface SourcePrimitiveConfig extends JsonObject {
+  mode?: "random_interval" | "periodic" | "burst" | "scripted" | (string & {});
+  entityType?: string;
+  intervalMs?: RangeConfig;
+  payloadTemplate?: JsonObject;
+}
+
+export interface QueuePrimitiveConfig extends JsonObject {
+  capacity?: number;
+  overflow?: "reject" | "backpressure" | "drop_newest" | "drop_oldest" | "conflate" | (string & {});
+  ordering?: "fifo" | "lifo" | "priority" | (string & {});
+  views?: string[];
+}
+
+export interface WorkerBatchPolicyConfig extends JsonObject {
+  mode?: "same_work_type" | "by_key" | "none" | (string & {});
+  key?: string;
+  maxBatchSize?: number;
+}
+
+export interface WorkerPrimitiveConfig extends JsonObject {
+  workerRole?: string;
+  workType?: string;
+  workTypes?: string[];
+  selectionPolicy?: "urgency" | "fifo" | "fair" | (string & {});
+  batchPolicy?: WorkerBatchPolicyConfig;
+  ownership?: JsonObject;
+  durations?: JsonObject;
+  capacity?: number;
+}
+
+export interface TimerPrimitiveConfig extends JsonObject {
+  mode?: "random_range" | "fixed" | "periodic" | (string & {});
+  modes?: string[];
+  durationMs?: RangeConfig;
+  onExpire?: string;
+}
+
+export interface StorePrimitiveConfig extends JsonObject {
+  entityType?: string;
+  keyField?: string;
+  indexes?: string[];
+  partitionBy?: string;
+  views?: string[];
+}
+
+export interface ResourcePoolPrimitiveConfig extends JsonObject {
+  resourceType?: string;
+  count?: number;
+  partitionBy?: string;
+  allocationPolicy?: string;
+}
+
+export interface GenericPrimitiveConfig extends JsonObject {}
+
+export type PrimitiveConfig =
+  | SourcePrimitiveConfig
+  | QueuePrimitiveConfig
+  | WorkerPrimitiveConfig
+  | TimerPrimitiveConfig
+  | StorePrimitiveConfig
+  | ResourcePoolPrimitiveConfig
+  | GenericPrimitiveConfig;
+
+type UnspecializedPrimitiveType = Exclude<PrimitiveType, KnownPrimitiveType>;
+
+export type PrimitiveMetadata =
+  | {
+      primitiveType?: undefined;
+      instanceName?: undefined;
+      primitiveConfig?: undefined;
+    }
+  | {
+      primitiveType: "source";
+      instanceName?: string;
+      primitiveConfig?: SourcePrimitiveConfig;
+    }
+  | {
+      primitiveType: "queue";
+      instanceName?: string;
+      primitiveConfig?: QueuePrimitiveConfig;
+    }
+  | {
+      primitiveType: "worker";
+      instanceName?: string;
+      primitiveConfig?: WorkerPrimitiveConfig;
+    }
+  | {
+      primitiveType: "timer";
+      instanceName?: string;
+      primitiveConfig?: TimerPrimitiveConfig;
+    }
+  | {
+      primitiveType: "store";
+      instanceName?: string;
+      primitiveConfig?: StorePrimitiveConfig;
+    }
+  | {
+      primitiveType: "resource_pool";
+      instanceName?: string;
+      primitiveConfig?: ResourcePoolPrimitiveConfig;
+    }
+  | {
+      primitiveType: UnspecializedPrimitiveType;
+      instanceName?: string;
+      primitiveConfig?: GenericPrimitiveConfig;
+    };
 
 export type DeliveryMode =
   | "FireAndForget"
@@ -125,7 +264,7 @@ export type NodeBase = {
   activityLabel?: string;
   activityValue?: string;
   activityTone?: "sent" | "received" | "service" | "dropped";
-};
+} & PrimitiveMetadata;
 
 export interface PublisherNodeData extends NodeBase {
   kind: "publisher";

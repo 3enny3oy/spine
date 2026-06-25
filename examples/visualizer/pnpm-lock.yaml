@@ -11,9 +11,15 @@ importers:
       '@ariakit/react':
         specifier: ^0.4.17
         version: 0.4.30(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
+      '@tisoap/react-flow-smart-edge':
+        specifier: ^4.11.1
+        version: 4.11.1(@xyflow/react@12.11.1(@types/react-dom@19.2.3(@types/react@19.2.17))(@types/react@19.2.17)(react-dom@19.2.7(react@19.2.7))(react@19.2.7))(react-dom@19.2.7(react@19.2.7))(react@19.2.7)(typescript@5.9.3)
       '@xyflow/react':
         specifier: ^12.8.5
         version: 12.11.1(@types/react-dom@19.2.3(@types/react@19.2.17))(@types/react@19.2.17)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
+      elkjs:
+        specifier: ^0.11.1
+        version: 0.11.1
       react:
         specifier: ^19.0.0
         version: 19.2.7
@@ -575,6 +581,14 @@ packages:
     peerDependencies:
       vite: ^5.2.0 || ^6 || ^7 || ^8
 
+  '@tisoap/react-flow-smart-edge@4.11.1':
+    resolution: {integrity: sha512-XwMwQQ1AGVO5fQyRt+e1CQwUhyolB93CnxX80nXVf4y3XOJpLkE5+oSdnq24NVOPpNfl+ciAcnjEJsReHFXpXg==}
+    peerDependencies:
+      '@xyflow/react': '>=12'
+      react: '>=18'
+      react-dom: '>=18'
+      typescript: '>=5'
+
   '@types/babel__core@7.20.5':
     resolution: {integrity: sha512-qoQprZvz5wQFJwMDqeseRXWv3rqMvhgpbXFfVyWhbx9X47POIA6i/+dXefEmZKoAgOaTdaIgNSMqMIU61yRyzA==}
 
@@ -713,6 +727,9 @@ packages:
 
   electron-to-chromium@1.5.377:
     resolution: {integrity: sha512-cH1jZgJHoezfTnKfKwnScpHywTFVnJUNITDPREFdhNjiuD502+QFpG0Qk7G8jhsV/f+CEAFlIrzP1fT+IMb92g==}
+
+  elkjs@0.11.1:
+    resolution: {integrity: sha512-zxxR9k+rx5ktMwT/FwyLdPCrq7xN6e4VGGHH8hA01vVYKjTFik7nHOxBnAYtrgYUB1RpAiLvA1/U2YraWxyKKg==}
 
   enhanced-resolve@5.21.6:
     resolution: {integrity: sha512-aNnGCvbJ/RIyWo1IuhNdVjnNF+EjH9wpzpNHt+ci/m9He9LJvUN8wrCcXjp9cWsGNAuvSpVFTx/vraAFQ8qGjQ==}
@@ -1391,6 +1408,13 @@ snapshots:
       tailwindcss: 4.3.1
       vite: 6.4.3(jiti@2.7.0)(lightningcss@1.32.0)
 
+  '@tisoap/react-flow-smart-edge@4.11.1(@xyflow/react@12.11.1(@types/react-dom@19.2.3(@types/react@19.2.17))(@types/react@19.2.17)(react-dom@19.2.7(react@19.2.7))(react@19.2.7))(react-dom@19.2.7(react@19.2.7))(react@19.2.7)(typescript@5.9.3)':
+    dependencies:
+      '@xyflow/react': 12.11.1(@types/react-dom@19.2.3(@types/react@19.2.17))(@types/react@19.2.17)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
+      react: 19.2.7
+      react-dom: 19.2.7(react@19.2.7)
+      typescript: 5.9.3
+
   '@types/babel__core@7.20.5':
     dependencies:
       '@babel/parser': 7.29.7
@@ -1541,6 +1565,8 @@ snapshots:
   detect-libc@2.1.2: {}
 
   electron-to-chromium@1.5.377: {}
+
+  elkjs@0.11.1: {}
 
   enhanced-resolve@5.21.6:
     dependencies:

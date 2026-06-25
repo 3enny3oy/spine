@@ -1,0 +1,967 @@
+{
+  "id": "cafe-blueprint",
+  "title": "Cafe blueprint",
+  "description": "Cafe worker system instantiated from reusable primitive blueprint nodes.",
+  "supportsSimulation": true,
+  "simulationKind": "cafe-pipeline",
+  "cafeConfig": {
+    "arrivalMinMs": 1200,
+    "arrivalMaxMs": 2600,
+    "queueCapacity": 12,
+    "greetingMs": 700,
+    "seatingMs": 900,
+    "menuMs": 500,
+    "orderMs": 800,
+    "serveMs": 650,
+    "billMs": 700,
+    "decisionMinMs": 2400,
+    "decisionMaxMs": 5200,
+    "eatMinMs": 5000,
+    "eatMaxMs": 9000,
+    "billPatienceMs": 3000,
+    "tipPercent": 0.16,
+    "tipFlat": 4,
+    "dishes": [
+      {
+        "id": "ramen",
+        "name": "Miso ramen",
+        "price": 18.5,
+        "prepMs": 4200
+      },
+      {
+        "id": "salad",
+        "name": "Citrus salad",
+        "price": 13,
+        "prepMs": 1900
+      },
+      {
+        "id": "pie",
+        "name": "Chicken pie",
+        "price": 21,
+        "prepMs": 5600
+      }
+    ]
+  },
+  "config": {
+    "id": "config-1",
+    "title": "Bus Config",
+    "position": {
+      "x": 80,
+      "y": 80
+    },
+    "allowCatchAll": false,
+    "defaultQueueDepth": 1024,
+    "recursionPolicy": {
+      "maxCausationDepth": 32,
+      "onExceeded": "RejectPublish"
+    },
+    "note": "Global delivery controls"
+  },
+  "nodes": [],
+  "edges": [],
+  "blueprint": {
+    "primitiveSchemaVersion": 1,
+    "instanceConfig": {
+      "seed": 42,
+      "speedMultiplier": 1,
+      "waiterCount": 2,
+      "tableCount": 10
+    },
+    "globals": {
+      "theme": "operations"
+    },
+    "nodes": [
+      {
+        "id": "publisher-arrivals",
+        "kind": "publisher",
+        "primitiveType": "source",
+        "instanceName": "customer-arrivals",
+        "title": "Arrival feed",
+        "position": {
+          "x": 80,
+          "y": 220
+        },
+        "note": "Generates customer arrivals at the configured rate.",
+        "config": {
+          "mode": "random_interval",
+          "entityType": "customer"
+        },
+        "bindings": {
+          "address": "cafe/customers/example-customer/arrived",
+          "payloadText": "{\n  \"customerId\": \"customer-001\",\n  \"partySize\": 2,\n  \"arrivedAtMs\": 0\n}",
+          "signalKind": "Event",
+          "customSignalKind": ""
+        }
+      },
+      {
+        "id": "publisher-queue",
+        "kind": "publisher",
+        "primitiveType": "queue",
+        "instanceName": "front-door-queue",
+        "title": "Queue manager",
+        "position": {
+          "x": 940,
+          "y": 220
+        },
+        "note": "Applies queue capacity rules and keeps track of the front customer.",
+        "config": {
+          "capacity": 12,
+          "overflow": "reject"
+        },
+        "bindings": {
+          "address": "cafe/queue/front/example-customer/queued",
+          "payloadText": "{\n  \"customerId\": \"customer-001\",\n  \"queueDepth\": 1,\n  \"capacity\": 12\n}",
+          "signalKind": "Event",
+          "customSignalKind": ""
+        }
+      },
+      {
+        "id": "publisher-concierge",
+        "kind": "publisher",
+        "primitiveType": "worker",
+        "instanceName": "concierge-1",
+        "title": "Concierge",
+        "position": {
+          "x": 1800,
+          "y": 220
+        },
+        "note": "Greets whoever is at the head of the queue.",
+        "config": {
+          "workerRole": "concierge",
+          "selectionPolicy": "fifo"
+        },
+        "bindings": {
+          "address": "cafe/queue/front/example-customer/greeted",
+          "payloadText": "{\n  \"customerId\": \"customer-001\",\n  \"greetedAtMs\": 0\n}",
+          "signalKind": "Event",
+          "customSignalKind": ""
+        }
+      },
+      {
+        "id": "publisher-waiter-router",
+        "kind": "publisher",
+        "primitiveType": "router",
+        "instanceName": "waiter-work-router",
+        "title": "Work request bus",
+        "position": {
+          "x": 2230,
+          "y": 220
+        },
+        "note": "Publishes waiter work requests that are claimed by section-owned waiter loops.",
+        "config": {
+          "routeBy": "workType"
+        },
+        "bindings": {
+          "address": "cafe/service/request/seat",
+          "payloadText": "{\n  \"requestType\": \"seat\",\n  \"customerId\": \"customer-001\"\n}",
+          "signalKind": "Event",
+          "customSignalKind": ""
+        }
+      },
+      {
+        "id": "publisher-seating",
+        "kind": "publisher",
+        "primitiveType": "worker",
+        "instanceName": "waiter-seat-run",
+        "title": "Seat run",
+        "position": {
+          "x": 940,
+          "y": 780
+        },
+        "note": "Seats greeted parties into free tables within the responsible waiter's section.",
+        "config": {
+          "workerRole": "waiter",
+          "workType": "seat"
+        },
+        "bindings": {
+          "address": "cafe/tables/table-01/seated",
+          "payloadText": "{\n  \"tableId\": \"table-01\",\n  \"customerId\": \"customer-001\",\n  \"waiterId\": \"waiter-1\"\n}",
+          "signalKind": "Event",
+          "customSignalKind": ""
+        }
+      },
+      {
+        "id": "publisher-menu",
+        "kind": "publisher",
+        "primitiveType": "worker",
+        "instanceName": "waiter-menu-run",
+        "title": "Menu run",
+        "position": {
+          "x": 1800,
+          "y": 780
+        },
+        "note": "Represents waiter menu runs across one or more actionable tables.",
+        "config": {
+          "workerRole": "waiter",
+          "workType": "menu"
+        },
+        "bindings": {
+          "address": "cafe/tables/table-01/menu-delivered",
+          "payloadText": "{\n  \"tableId\": \"table-01\",\n  \"customerId\": \"customer-001\",\n  \"menuId\": \"brunch\"\n}",
+          "signalKind": "Event",
+          "customSignalKind": ""
+        }
+      },
+      {
+        "id": "publisher-order",
+        "kind": "publisher",
+        "primitiveType": "worker",
+        "instanceName": "waiter-order-run",
+        "title": "Order run",
+        "position": {
+          "x": 2230,
+          "y": 780
+        },
+        "note": "Represents waiter order-taking runs that feed explicit kitchen tickets.",
+        "config": {
+          "workerRole": "waiter",
+          "workType": "order"
+        },
+        "bindings": {
+          "address": "cafe/orders/order-01/placed",
+          "payloadText": "{\n  \"orderId\": \"order-01\",\n  \"tableId\": \"table-01\",\n  \"dishId\": \"ramen\"\n}",
+          "signalKind": "Event",
+          "customSignalKind": ""
+        }
+      },
+      {
+        "id": "publisher-kitchen",
+        "kind": "publisher",
+        "primitiveType": "worker",
+        "instanceName": "chef-1",
+        "title": "Chef loop",
+        "position": {
+          "x": 2230,
+          "y": 1420
+        },
+        "note": "Represents kitchen ticket admission, batching by dish type, prep, and ready events.",
+        "config": {
+          "workerRole": "chef",
+          "batchPolicy": {
+            "mode": "by_key",
+            "key": "dishId"
+          }
+        },
+        "bindings": {
+          "address": "cafe/kitchen/orders/order-01/ready",
+          "payloadText": "{\n  \"orderId\": \"order-01\",\n  \"dishId\": \"ramen\",\n  \"prepMs\": 4500\n}",
+          "signalKind": "Event",
+          "customSignalKind": ""
+        }
+      },
+      {
+        "id": "publisher-service",
+        "kind": "publisher",
+        "primitiveType": "worker",
+        "instanceName": "waiter-serve-run",
+        "title": "Serve run",
+        "position": {
+          "x": 1800,
+          "y": 1080
+        },
+        "note": "Represents waiter service runs carrying ready dishes to assigned tables.",
+        "config": {
+          "workerRole": "waiter",
+          "workType": "serve"
+        },
+        "bindings": {
+          "address": "cafe/tables/table-01/served",
+          "payloadText": "{\n  \"tableId\": \"table-01\",\n  \"customerId\": \"customer-001\",\n  \"orderId\": \"order-01\",\n  \"dishId\": \"ramen\",\n  \"waiterId\": \"waiter-1\"\n}",
+          "signalKind": "Event",
+          "customSignalKind": ""
+        }
+      },
+      {
+        "id": "publisher-diner",
+        "kind": "publisher",
+        "primitiveType": "timer",
+        "instanceName": "customer-timers",
+        "title": "Customer timers",
+        "position": {
+          "x": 2230,
+          "y": 480
+        },
+        "note": "Represents diner-driven readiness, bill requests, and other timed customer-side events.",
+        "config": {
+          "modes": [
+            "decision",
+            "eating"
+          ]
+        },
+        "bindings": {
+          "address": "cafe/orders/order-01/requested",
+          "payloadText": "{\n  \"customerId\": \"customer-001\",\n  \"tableId\": \"table-01\",\n  \"orderId\": \"order-01\",\n  \"dishId\": \"ramen\"\n}",
+          "signalKind": "Event",
+          "customSignalKind": ""
+        }
+      },
+      {
+        "id": "publisher-billing",
+        "kind": "publisher",
+        "primitiveType": "worker",
+        "instanceName": "waiter-billing-run",
+        "title": "Bill / payment run",
+        "position": {
+          "x": 2230,
+          "y": 1080
+        },
+        "note": "Publishes bill presentation and explicit payment-collection payloads.",
+        "config": {
+          "workerRole": "waiter",
+          "workTypes": [
+            "bill",
+            "payment"
+          ]
+        },
+        "bindings": {
+          "address": "cafe/billing/table-01/presented",
+          "payloadText": "{\n  \"customerId\": \"customer-001\",\n  \"tableId\": \"table-01\",\n  \"subtotal\": 18.5,\n  \"billWaitMs\": 1200\n}",
+          "signalKind": "Event",
+          "customSignalKind": ""
+        }
+      },
+      {
+        "id": "publisher-turnover",
+        "kind": "publisher",
+        "primitiveType": "transform",
+        "instanceName": "table-turnover",
+        "title": "Table turnover",
+        "position": {
+          "x": 3090,
+          "y": 1080
+        },
+        "note": "Frees tables for the next party after payment clears.",
+        "config": {
+          "on": "payment-complete"
+        },
+        "bindings": {
+          "address": "cafe/tables/table-01/cleared",
+          "payloadText": "{\n  \"tableId\": \"table-01\",\n  \"readyForNextParty\": true\n}",
+          "signalKind": "Event",
+          "customSignalKind": ""
+        }
+      },
+      {
+        "id": "publisher-departures",
+        "kind": "publisher",
+        "primitiveType": "observer",
+        "instanceName": "customer-departures",
+        "title": "Customer departure",
+        "position": {
+          "x": 3520,
+          "y": 1080
+        },
+        "note": "Final exit signal after explicit payment collection and table turnover complete.",
+        "config": {
+          "emits": "visit-complete"
+        },
+        "bindings": {
+          "address": "cafe/customers/customer-001/departed",
+          "payloadText": "{\n  \"customerId\": \"customer-001\",\n  \"tableId\": \"table-01\",\n  \"total\": 21.5,\n  \"tip\": 3.0\n}",
+          "signalKind": "Event",
+          "customSignalKind": ""
+        }
+      },
+      {
+        "id": "subscriber-front-door",
+        "kind": "subscriber",
+        "primitiveType": "router",
+        "instanceName": "front-door-intake",
+        "title": "Front door intake",
+        "position": {
+          "x": 510,
+          "y": 220
+        },
+        "note": "Accepts arrivals and hands them to the queue rules.",
+        "config": {
+          "accepts": "customer-arrival"
+        },
+        "bindings": {
+          "expression": "cafe/customers/{customer_id}/arrived",
+          "schemaId": "cafe.customer.arrived.v1",
+          "delivery": {
+            "mode": "FireAndForget",
+            "payloadStrategy": "SendPayload",
+            "retry": {
+              "maxAttempts": 0,
+              "initialDelayMs": 0,
+              "maxDelayMs": 0,
+              "backoff": "Exponential",
+              "jitter": false
+            },
+            "timeout": {
+              "handlerTimeoutMs": null,
+              "deliveryDeadlineMs": null
+            },
+            "rate": {
+              "maxPerSecond": null,
+              "burst": null
+            },
+            "timing": {
+              "debounceMs": null,
+              "throttleMs": null
+            },
+            "conflation": "None",
+            "queue": {
+              "maxDepth": 8,
+              "overflow": "RejectPublish"
+            },
+            "payloadLimits": {
+              "maxInlineBytes": null,
+              "maxDepth": null
+            },
+            "ordering": "PerSubscription",
+            "recursion": {
+              "maxCausationDepth": 32,
+              "onExceeded": "RejectPublish"
+            }
+          },
+          "configurationExpression": "",
+          "queueDepth": 8
+        }
+      },
+      {
+        "id": "subscriber-queue",
+        "kind": "subscriber",
+        "primitiveType": "queue",
+        "instanceName": "front-door-queue-state",
+        "title": "Queue rules",
+        "position": {
+          "x": 1370,
+          "y": 220
+        },
+        "note": "Tracks front-of-queue state, capacity, and rejections.",
+        "config": {
+          "views": [
+            "depth",
+            "rejections"
+          ]
+        },
+        "bindings": {
+          "expression": "cafe/queue/front/{customer_id}/*",
+          "schemaId": "cafe.queue.activity.v1",
+          "delivery": {
+            "mode": "FireAndForget",
+            "payloadStrategy": "SendPayload",
+            "retry": {
+              "maxAttempts": 0,
+              "initialDelayMs": 0,
+              "maxDelayMs": 0,
+              "backoff": "Exponential",
+              "jitter": false
+            },
+            "timeout": {
+              "handlerTimeoutMs": null,
+              "deliveryDeadlineMs": null
+            },
+            "rate": {
+              "maxPerSecond": null,
+              "burst": null
+            },
+            "timing": {
+              "debounceMs": null,
+              "throttleMs": null
+            },
+            "conflation": "None",
+            "queue": {
+              "maxDepth": 8,
+              "overflow": "RejectPublish"
+            },
+            "payloadLimits": {
+              "maxInlineBytes": null,
+              "maxDepth": null
+            },
+            "ordering": "PerSubscription",
+            "recursion": {
+              "maxCausationDepth": 32,
+              "onExceeded": "RejectPublish"
+            }
+          },
+          "configurationExpression": "",
+          "queueDepth": 8
+        }
+      },
+      {
+        "id": "subscriber-router",
+        "kind": "subscriber",
+        "primitiveType": "router",
+        "instanceName": "work-request-stream",
+        "title": "Work request stream",
+        "position": {
+          "x": 2660,
+          "y": 220
+        },
+        "note": "Receives seating, menu, order, service, bill, and payment work requests.",
+        "config": {
+          "streamType": "work"
+        },
+        "bindings": {
+          "expression": "cafe/service/request/*",
+          "schemaId": "cafe.service.request.v1",
+          "delivery": {
+            "mode": "FireAndForget",
+            "payloadStrategy": "SendPayload",
+            "retry": {
+              "maxAttempts": 0,
+              "initialDelayMs": 0,
+              "maxDelayMs": 0,
+              "backoff": "Exponential",
+              "jitter": false
+            },
+            "timeout": {
+              "handlerTimeoutMs": null,
+              "deliveryDeadlineMs": null
+            },
+            "rate": {
+              "maxPerSecond": null,
+              "burst": null
+            },
+            "timing": {
+              "debounceMs": null,
+              "throttleMs": null
+            },
+            "conflation": "None",
+            "queue": {
+              "maxDepth": 8,
+              "overflow": "RejectPublish"
+            },
+            "payloadLimits": {
+              "maxInlineBytes": null,
+              "maxDepth": null
+            },
+            "ordering": "PerSubscription",
+            "recursion": {
+              "maxCausationDepth": 32,
+              "onExceeded": "RejectPublish"
+            }
+          },
+          "configurationExpression": "",
+          "queueDepth": 8
+        }
+      },
+      {
+        "id": "subscriber-tables",
+        "kind": "subscriber",
+        "primitiveType": "store",
+        "instanceName": "table-store",
+        "title": "Table sections",
+        "position": {
+          "x": 1370,
+          "y": 780
+        },
+        "note": "Tracks the 10-table pool, waiter section ownership, menu delivery, service, and turnover.",
+        "config": {
+          "entityType": "table",
+          "partitionBy": "waiterSection"
+        },
+        "bindings": {
+          "expression": "cafe/tables/{table_id}/*",
+          "schemaId": "cafe.table.activity.v1",
+          "delivery": {
+            "mode": "FireAndForget",
+            "payloadStrategy": "SendPayload",
+            "retry": {
+              "maxAttempts": 0,
+              "initialDelayMs": 0,
+              "maxDelayMs": 0,
+              "backoff": "Exponential",
+              "jitter": false
+            },
+            "timeout": {
+              "handlerTimeoutMs": null,
+              "deliveryDeadlineMs": null
+            },
+            "rate": {
+              "maxPerSecond": null,
+              "burst": null
+            },
+            "timing": {
+              "debounceMs": null,
+              "throttleMs": null
+            },
+            "conflation": "None",
+            "queue": {
+              "maxDepth": 8,
+              "overflow": "RejectPublish"
+            },
+            "payloadLimits": {
+              "maxInlineBytes": null,
+              "maxDepth": null
+            },
+            "ordering": "PerSubscription",
+            "recursion": {
+              "maxCausationDepth": 32,
+              "onExceeded": "RejectPublish"
+            }
+          },
+          "configurationExpression": "",
+          "queueDepth": 8
+        }
+      },
+      {
+        "id": "subscriber-orders",
+        "kind": "subscriber",
+        "primitiveType": "store",
+        "instanceName": "order-store",
+        "title": "Order stream",
+        "position": {
+          "x": 2660,
+          "y": 780
+        },
+        "note": "Feeds explicit kitchen tickets from diners that are ready to order.",
+        "config": {
+          "entityType": "order"
+        },
+        "bindings": {
+          "expression": "cafe/orders/{order_id}/*",
+          "schemaId": "cafe.order.activity.v1",
+          "delivery": {
+            "mode": "FireAndForget",
+            "payloadStrategy": "SendPayload",
+            "retry": {
+              "maxAttempts": 0,
+              "initialDelayMs": 0,
+              "maxDelayMs": 0,
+              "backoff": "Exponential",
+              "jitter": false
+            },
+            "timeout": {
+              "handlerTimeoutMs": null,
+              "deliveryDeadlineMs": null
+            },
+            "rate": {
+              "maxPerSecond": null,
+              "burst": null
+            },
+            "timing": {
+              "debounceMs": null,
+              "throttleMs": null
+            },
+            "conflation": "None",
+            "queue": {
+              "maxDepth": 8,
+              "overflow": "RejectPublish"
+            },
+            "payloadLimits": {
+              "maxInlineBytes": null,
+              "maxDepth": null
+            },
+            "ordering": "PerSubscription",
+            "recursion": {
+              "maxCausationDepth": 32,
+              "onExceeded": "RejectPublish"
+            }
+          },
+          "configurationExpression": "",
+          "queueDepth": 8
+        }
+      },
+      {
+        "id": "subscriber-kitchen",
+        "kind": "subscriber",
+        "primitiveType": "store",
+        "instanceName": "kitchen-ticket-store",
+        "title": "Kitchen tickets",
+        "position": {
+          "x": 2660,
+          "y": 1420
+        },
+        "note": "Shows ticket queueing, dish-type batching, prep started, and ready-for-service states.",
+        "config": {
+          "entityType": "kitchen_ticket",
+          "indexes": [
+            "status",
+            "dishId"
+          ]
+        },
+        "bindings": {
+          "expression": "cafe/kitchen/orders/{order_id}/*",
+          "schemaId": "cafe.kitchen.activity.v1",
+          "delivery": {
+            "mode": "FireAndForget",
+            "payloadStrategy": "SendPayload",
+            "retry": {
+              "maxAttempts": 0,
+              "initialDelayMs": 0,
+              "maxDelayMs": 0,
+              "backoff": "Exponential",
+              "jitter": false
+            },
+            "timeout": {
+              "handlerTimeoutMs": null,
+              "deliveryDeadlineMs": null
+            },
+            "rate": {
+              "maxPerSecond": null,
+              "burst": null
+            },
+            "timing": {
+              "debounceMs": null,
+              "throttleMs": null
+            },
+            "conflation": "None",
+            "queue": {
+              "maxDepth": 8,
+              "overflow": "RejectPublish"
+            },
+            "payloadLimits": {
+              "maxInlineBytes": null,
+              "maxDepth": null
+            },
+            "ordering": "PerSubscription",
+            "recursion": {
+              "maxCausationDepth": 32,
+              "onExceeded": "RejectPublish"
+            }
+          },
+          "configurationExpression": "",
+          "queueDepth": 8
+        }
+      },
+      {
+        "id": "subscriber-billing",
+        "kind": "subscriber",
+        "primitiveType": "store",
+        "instanceName": "billing-store",
+        "title": "Billing / payment",
+        "position": {
+          "x": 2660,
+          "y": 1080
+        },
+        "note": "Captures bill requests, bill delivery, payment collection, and tip outcomes.",
+        "config": {
+          "entityType": "bill"
+        },
+        "bindings": {
+          "expression": "cafe/billing/{table_id}/*",
+          "schemaId": "cafe.billing.activity.v1",
+          "delivery": {
+            "mode": "FireAndForget",
+            "payloadStrategy": "SendPayload",
+            "retry": {
+              "maxAttempts": 0,
+              "initialDelayMs": 0,
+              "maxDelayMs": 0,
+              "backoff": "Exponential",
+              "jitter": false
+            },
+            "timeout": {
+              "handlerTimeoutMs": null,
+              "deliveryDeadlineMs": null
+            },
+            "rate": {
+              "maxPerSecond": null,
+              "burst": null
+            },
+            "timing": {
+              "debounceMs": null,
+              "throttleMs": null
+            },
+            "conflation": "None",
+            "queue": {
+              "maxDepth": 8,
+              "overflow": "RejectPublish"
+            },
+            "payloadLimits": {
+              "maxInlineBytes": null,
+              "maxDepth": null
+            },
+            "ordering": "PerSubscription",
+            "recursion": {
+              "maxCausationDepth": 32,
+              "onExceeded": "RejectPublish"
+            }
+          },
+          "configurationExpression": "",
+          "queueDepth": 8
+        }
+      },
+      {
+        "id": "service-menu-catalog",
+        "kind": "service",
+        "primitiveType": "store",
+        "instanceName": "menu-catalog",
+        "title": "Menu catalog",
+        "position": {
+          "x": 1800,
+          "y": 480
+        },
+        "note": "Provides configurable dish price and prep-time metadata.",
+        "config": {
+          "entityType": "menu_item"
+        },
+        "bindings": {
+          "address": "cafe/services/menu-catalog",
+          "serviceName": "MenuCatalog"
+        }
+      },
+      {
+        "id": "service-waiter-pool",
+        "kind": "service",
+        "primitiveType": "resource_pool",
+        "instanceName": "waiter-sections",
+        "title": "Waiter sections",
+        "position": {
+          "x": 3090,
+          "y": 220
+        },
+        "note": "Represents the two waiter sections and their worker-loop allocation behavior in the client-side runner.",
+        "config": {
+          "resourceType": "staff_section",
+          "count": 2
+        },
+        "bindings": {
+          "address": "cafe/services/waiter-pool",
+          "serviceName": "WaiterPool"
+        }
+      }
+    ],
+    "edges": [
+      {
+        "id": "arrivals-front-door",
+        "source": "publisher-arrivals",
+        "target": "subscriber-front-door"
+      },
+      {
+        "id": "front-door-queue",
+        "source": "subscriber-front-door",
+        "target": "publisher-queue"
+      },
+      {
+        "id": "queue-queue-rules",
+        "source": "publisher-queue",
+        "target": "subscriber-queue"
+      },
+      {
+        "id": "queue-concierge",
+        "source": "subscriber-queue",
+        "target": "publisher-concierge"
+      },
+      {
+        "id": "concierge-router",
+        "source": "publisher-concierge",
+        "target": "publisher-waiter-router"
+      },
+      {
+        "id": "router-requests",
+        "source": "publisher-waiter-router",
+        "target": "subscriber-router"
+      },
+      {
+        "id": "requests-waiter-pool",
+        "source": "subscriber-router",
+        "target": "service-waiter-pool"
+      },
+      {
+        "id": "waiter-pool-seating",
+        "source": "service-waiter-pool",
+        "target": "publisher-seating"
+      },
+      {
+        "id": "waiter-pool-menu",
+        "source": "service-waiter-pool",
+        "target": "publisher-menu"
+      },
+      {
+        "id": "waiter-pool-order",
+        "source": "service-waiter-pool",
+        "target": "publisher-order"
+      },
+      {
+        "id": "waiter-pool-service",
+        "source": "service-waiter-pool",
+        "target": "publisher-service"
+      },
+      {
+        "id": "waiter-pool-billing",
+        "source": "service-waiter-pool",
+        "target": "publisher-billing"
+      },
+      {
+        "id": "seating-tables",
+        "source": "publisher-seating",
+        "target": "subscriber-tables"
+      },
+      {
+        "id": "tables-router",
+        "source": "subscriber-tables",
+        "target": "publisher-waiter-router"
+      },
+      {
+        "id": "tables-menu",
+        "source": "subscriber-tables",
+        "target": "publisher-menu"
+      },
+      {
+        "id": "menu-catalog",
+        "source": "publisher-menu",
+        "target": "service-menu-catalog"
+      },
+      {
+        "id": "catalog-diner",
+        "source": "service-menu-catalog",
+        "target": "publisher-diner"
+      },
+      {
+        "id": "diner-order",
+        "source": "publisher-diner",
+        "target": "publisher-order"
+      },
+      {
+        "id": "diner-billing",
+        "source": "publisher-diner",
+        "target": "publisher-billing"
+      },
+      {
+        "id": "order-intake",
+        "source": "publisher-order",
+        "target": "subscriber-orders"
+      },
+      {
+        "id": "orders-kitchen",
+        "source": "subscriber-orders",
+        "target": "publisher-kitchen"
+      },
+      {
+        "id": "kitchen-stages",
+        "source": "publisher-kitchen",
+        "target": "subscriber-kitchen"
+      },
+      {
+        "id": "kitchen-router",
+        "source": "subscriber-kitchen",
+        "target": "publisher-waiter-router"
+      },
+      {
+        "id": "kitchen-service",
+        "source": "subscriber-kitchen",
+        "target": "publisher-service"
+      },
+      {
+        "id": "billing-queue",
+        "source": "publisher-billing",
+        "target": "subscriber-billing"
+      },
+      {
+        "id": "billing-router",
+        "source": "subscriber-billing",
+        "target": "publisher-waiter-router"
+      },
+      {
+        "id": "billing-turnover",
+        "source": "subscriber-billing",
+        "target": "publisher-turnover"
+      },
+      {
+        "id": "turnover-tables",
+        "source": "publisher-turnover",
+        "target": "subscriber-tables"
+      },
+      {
+        "id": "turnover-departures",
+        "source": "publisher-turnover",
+        "target": "publisher-departures"
+      }
+    ]
+  }
+}

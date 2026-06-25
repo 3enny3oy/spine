@@ -1,14 +1,38 @@
 import {
-  CAFE_NODE_IDS,
   DEFAULT_CAFE_METRICS,
   DEFAULT_CAFE_QUEUE_SNAPSHOT,
   type CafeDishConfig,
   type CafeMetrics,
   type CafeQueueSnapshot,
   type CafeScenarioConfig,
+  type CafeSimulationRuntime,
 } from "./scenarios";
+import { selectWorkerBatch } from "./simulationPrimitives";
+import {
+  claimSimulationWorkItems,
+  createSimulationEntityStore,
+  createSimulationWorkStore,
+  findSimulationEntity,
+  getSimulationEntity,
+  listSimulationEntities,
+  removeSimulationEntity,
+  reopenSimulationWorkItem,
+  type SimulationEntityStore,
+  type SimulationWorkItem,
+  type SimulationWorkStore,
+  upsertSimulationEntity,
+} from "./simulationStores";
+import {
+  createSimulationQueue,
+  enqueueSimulationQueue,
+  getSimulationQueueSize,
+  listSimulationQueue,
+  removeFromSimulationQueue,
+  type SimulationQueue,
+} from "./simulationQueues";
 
-type WaiterTaskType = "seat" | "menu" | "order" | "serve" | "bill";
+type WaiterTaskType = "seat" | "menu" | "order" | "serve" | "bill" | "payment";
+type KitchenTicketStatus = "queued" | "prepping" | "ready";
 type CustomerStatus =
   | "queued"
   | "greeted"
@@ -19,6 +43,7 @@ type CustomerStatus =
   | "ready-to-serve"
   | "eating"
   | "waiting-bill"
+  | "ready-to-pay"
   | "paid"
   | "departed"
   | "turned-away";
@@ -40,19 +65,42 @@ interface CustomerRecord {
   tipAmount?: number;
 }
 
-interface WaiterTask {
-  type: WaiterTaskType;
+interface WorkItem extends SimulationWorkItem<WaiterTaskType, string, string> {}
+
+interface KitchenTicket {
+  id: string;
   customerId: string;
+  orderId: string;
+  tableId: string | null;
+  dish: CafeDishConfig;
   createdAtMs: number;
+  status: KitchenTicketStatus;
+  batchId?: string | null;
+  startedPrepAtMs?: number;
+  readyAtMs?: number;
 }
 
 interface WaiterState {
   id: string;
+  tableIds: string[];
   busy: boolean;
+  currentWorkItemIds: string[];
+  currentWorkType: WaiterTaskType | null;
+  lastFairnessKey: string | null;
+}
+
+interface ChefState {
+  busy: boolean;
+  currentDishId: string | null;
+  currentBatchId: string | null;
+  currentTicketIds: string[];
+  currentBatchDueAtMs: number | null;
+  lastFairnessKey: string | null;
 }
 
 interface TableState {
   id: string;
+  waiterId: string;
   customerId: string | null;
 }
 
@@ -61,12 +109,16 @@ interface SimulationState {
   started: boolean;
   customerSeq: number;
   nextTimerId: number;
+  nextWorkItemSeq: number;
+  nextKitchenBatchSeq: number;
   timers: Map<number, ScheduledTask>;
-  customers: Map<string, CustomerRecord>;
-  queue: string[];
+  customers: SimulationEntityStore<CustomerRecord>;
+  queue: SimulationQueue<string>;
   waiters: WaiterState[];
-  tables: TableState[];
-  pendingTasks: WaiterTask[];
+  chef: ChefState;
+  tables: SimulationEntityStore<TableState>;
+  workItems: SimulationWorkStore<WorkItem>;
+  kitchenTickets: SimulationEntityStore<KitchenTicket>;
   conciergeBusy: boolean;
 }
 
@@ -80,6 +132,7 @@ interface ScheduledTask {
 
 interface CafeSimulationCallbacks {
   getConfig: () => CafeScenarioConfig;
+  getRuntime: () => CafeSimulationRuntime;
   getSpeedMultiplier: () => number;
   onMetrics: (metrics: CafeMetrics) => void;
   onQueues: (queues: CafeQueueSnapshot) => void;
@@ -93,12 +146,13 @@ export interface CafeSimulationController {
   isRunning: () => boolean;
 }
 
-const TASK_PRIORITY: Record<WaiterTaskType, number> = {
-  bill: 0,
-  serve: 1,
-  order: 2,
-  seat: 3,
-  menu: 4,
+const WORK_TYPE_BASE_SCORE: Record<WaiterTaskType, number> = {
+  bill: 120,
+  payment: 140,
+  serve: 100,
+  order: 80,
+  seat: 60,
+  menu: 40,
 };
 
 export function createCafeSimulation(callbacks: CafeSimulationCallbacks): CafeSimulationController {
@@ -117,6 +171,7 @@ export function createCafeSimulation(callbacks: CafeSimulationCallbacks): CafeSi
     }
     maybeProcessConcierge();
     maybeDispatchWaiters();
+    maybeProcessChef();
     updateMetrics();
   }
 
@@ -132,34 +187,39 @@ export function createCafeSimulation(callbacks: CafeSimulationCallbacks): CafeSi
   }
 
   function createState(): SimulationState {
-      return {
-        running: false,
-        started: false,
-        customerSeq: 0,
-        nextTimerId: 1,
-        timers: new Map<number, ScheduledTask>(),
-        customers: new Map(),
-        queue: [],
-      waiters: [
-        { id: "waiter-1", busy: false },
-        { id: "waiter-2", busy: false },
-      ],
-      tables: Array.from({ length: 10 }, (_, index) => ({
-        id: `table-${String(index + 1).padStart(2, "0")}`,
-        customerId: null,
-      })),
-      pendingTasks: [],
+    const waiters: WaiterState[] = currentRuntime().waiters.map((waiter) => ({
+      id: waiter.id,
+      tableIds: [...waiter.tableIds],
+      busy: false,
+      currentWorkItemIds: [],
+      currentWorkType: null,
+      lastFairnessKey: null,
+    }));
+
+    return {
+      running: false,
+      started: false,
+      customerSeq: 0,
+      nextTimerId: 1,
+      nextWorkItemSeq: 1,
+      nextKitchenBatchSeq: 1,
+      timers: new Map<number, ScheduledTask>(),
+      customers: createSimulationEntityStore<CustomerRecord>(),
+      queue: createSimulationQueue<string>(),
+      waiters,
+      chef: {
+        busy: false,
+        currentDishId: null,
+        currentBatchId: null,
+        currentTicketIds: [],
+        currentBatchDueAtMs: null,
+        lastFairnessKey: null,
+      },
+      tables: buildTableStore(waiters),
+      workItems: createSimulationWorkStore<WorkItem>(),
+      kitchenTickets: createSimulationEntityStore<KitchenTicket>(),
       conciergeBusy: false,
     };
-  }
-
-  function clearTimers() {
-    for (const task of state.timers.values()) {
-      if (task.timeoutId !== null) {
-        window.clearTimeout(task.timeoutId);
-      }
-    }
-    state.timers.clear();
   }
 
   function pauseTimers() {
@@ -228,6 +288,24 @@ export function createCafeSimulation(callbacks: CafeSimulationCallbacks): CafeSi
     return callbacks.getConfig();
   }
 
+  function currentRuntime() {
+    return callbacks.getRuntime();
+  }
+
+  function buildTableStore(waiters: WaiterState[]) {
+    const tables = createSimulationEntityStore<TableState>();
+    for (const waiter of waiters) {
+      for (const tableId of waiter.tableIds) {
+        upsertSimulationEntity(tables, {
+          id: tableId,
+          waiterId: waiter.id,
+          customerId: null,
+        });
+      }
+    }
+    return tables;
+  }
+
   function randomBetween(min: number, max: number) {
     if (max <= min) {
       return min;
@@ -240,20 +318,27 @@ export function createCafeSimulation(callbacks: CafeSimulationCallbacks): CafeSi
     return dishes[Math.floor(Math.random() * dishes.length)] ?? dishes[0];
   }
 
-  function firstFreeTable() {
-    return state.tables.find((table) => table.customerId === null) ?? null;
+  function tableById(tableId: string) {
+    return getSimulationEntity(state.tables, tableId);
+  }
+
+  function firstFreeTableForWaiter(waiterId: string) {
+    return (
+      findSimulationEntity(
+        state.tables,
+        (table) => table.waiterId === waiterId && table.customerId === null,
+      ) ?? null
+    );
+  }
+
+  function kitchenTicketForCustomer(customerId: string) {
+    return findSimulationEntity(state.kitchenTickets, (ticket) => ticket.customerId === customerId);
   }
 
   function queueFrontWaitingForGreeting() {
-    return state.queue
-      .map((customerId) => state.customers.get(customerId))
+    return listSimulationQueue(state.queue)
+      .map((customerId) => getSimulationEntity(state.customers, customerId))
       .find((customer): customer is CustomerRecord => Boolean(customer && customer.status === "queued")) ?? null;
-  }
-
-  function queueFrontReadyToSeat() {
-    return state.queue
-      .map((customerId) => state.customers.get(customerId))
-      .find((customer): customer is CustomerRecord => Boolean(customer && customer.status === "greeted")) ?? null;
   }
 
   function scheduleNextArrival() {
@@ -272,18 +357,18 @@ export function createCafeSimulation(callbacks: CafeSimulationCallbacks): CafeSi
       queuedAtMs: now(),
     };
 
-    publish(CAFE_NODE_IDS.arrivals, `cafe/customers/${customerId}/arrived`, {
+    publish(currentRuntime().publishNodes.arrivals, `cafe/customers/${customerId}/arrived`, {
       customerId,
       partySize: customer.partySize,
       arrivedAtMs: customer.queuedAtMs,
     });
 
-    if (state.queue.length >= config.queueCapacity) {
+    if (getSimulationQueueSize(state.queue) >= config.queueCapacity) {
       customer.status = "turned-away";
-      state.customers.set(customerId, customer);
-      publish(CAFE_NODE_IDS.queue, `cafe/queue/front/${customerId}/rejected`, {
+      upsertSimulationEntity(state.customers, customer);
+      publish(currentRuntime().publishNodes.queue, `cafe/queue/front/${customerId}/rejected`, {
         customerId,
-        queueDepth: state.queue.length,
+        queueDepth: getSimulationQueueSize(state.queue),
         queueCapacity: config.queueCapacity,
       });
       updateMetrics();
@@ -291,11 +376,11 @@ export function createCafeSimulation(callbacks: CafeSimulationCallbacks): CafeSi
       return;
     }
 
-    state.customers.set(customerId, customer);
-    state.queue.push(customerId);
-    publish(CAFE_NODE_IDS.queue, `cafe/queue/front/${customerId}/queued`, {
+    upsertSimulationEntity(state.customers, customer);
+    enqueueSimulationQueue(state.queue, customerId);
+    publish(currentRuntime().publishNodes.queue, `cafe/queue/front/${customerId}/queued`, {
       customerId,
-      queueDepth: state.queue.length,
+      queueDepth: getSimulationQueueSize(state.queue),
       queueCapacity: config.queueCapacity,
     });
 
@@ -315,7 +400,7 @@ export function createCafeSimulation(callbacks: CafeSimulationCallbacks): CafeSi
     }
     state.conciergeBusy = true;
     schedule(currentConfig().greetingMs, () => {
-      const nextCustomer = state.customers.get(customer.id);
+      const nextCustomer = getSimulationEntity(state.customers, customer.id);
       if (!nextCustomer || nextCustomer.status !== "queued") {
         state.conciergeBusy = false;
         maybeProcessConcierge();
@@ -323,11 +408,11 @@ export function createCafeSimulation(callbacks: CafeSimulationCallbacks): CafeSi
       }
       nextCustomer.status = "greeted";
       nextCustomer.greetedAtMs = now();
-      publish(CAFE_NODE_IDS.concierge, `cafe/queue/front/${customer.id}/greeted`, {
+      publish(currentRuntime().publishNodes.concierge, `cafe/queue/front/${customer.id}/greeted`, {
         customerId: customer.id,
         greetedAtMs: nextCustomer.greetedAtMs,
       });
-      requestWaiterTask("seat", customer.id);
+      requestWaiterWork("seat", customer.id);
       state.conciergeBusy = false;
       maybeProcessConcierge();
       maybeDispatchWaiters();
@@ -335,71 +420,365 @@ export function createCafeSimulation(callbacks: CafeSimulationCallbacks): CafeSi
     });
   }
 
-  function requestWaiterTask(type: WaiterTaskType, customerId: string) {
-    if (
-      state.pendingTasks.some((task) => task.type === type && task.customerId === customerId)
-    ) {
-      return;
+  function requestWaiterWork(type: WaiterTaskType, customerId: string) {
+    const existingItem = findSimulationEntity(
+      state.workItems,
+      (workItem) => workItem.type === type && workItem.subjectId === customerId,
+    );
+    if (existingItem) {
+      return existingItem;
     }
-    const customer = state.customers.get(customerId);
+
+    const customer = getSimulationEntity(state.customers, customerId);
     if (!customer) {
-      return;
+      return null;
     }
-    state.pendingTasks.push({ type, customerId, createdAtMs: now() });
-    publish(CAFE_NODE_IDS.waiterRouter, `cafe/service/request/${type}`, {
+
+    const workItem: WorkItem = {
+      id: `work-${String(state.nextWorkItemSeq++).padStart(4, "0")}`,
+      type,
+      subjectId: customerId,
+      createdAtMs: now(),
+      status: "open",
+      blockedReason: null,
+    };
+    upsertSimulationEntity(state.workItems, workItem);
+
+    publish(currentRuntime().publishNodes.waiterRouter, `cafe/service/request/${type}`, {
+      workItemId: workItem.id,
       requestType: type,
       customerId,
       tableId: customer.tableId ?? null,
     });
+
+    return workItem;
   }
 
   function maybeDispatchWaiters() {
     if (!state.running) {
       return;
     }
-    state.pendingTasks.sort((left, right) => {
-      const priorityDelta = TASK_PRIORITY[left.type] - TASK_PRIORITY[right.type];
-      if (priorityDelta !== 0) {
-        return priorityDelta;
+
+    for (const workItem of listSimulationEntities(state.workItems)) {
+      if (workItem.status === "open") {
+        workItem.blockedReason = blockedReasonForWorkItem(workItem);
       }
-      return left.createdAtMs - right.createdAtMs;
-    });
+    }
 
     for (const waiter of state.waiters) {
       if (waiter.busy) {
         continue;
       }
-      const taskIndex = state.pendingTasks.findIndex((task) => canRunTask(task));
-      if (taskIndex === -1) {
+
+      const selection = nextWorkBatchForWaiter(waiter);
+      const nextWorkBatch = selection.items;
+      if (nextWorkBatch.length === 0) {
         continue;
       }
-      const [task] = state.pendingTasks.splice(taskIndex, 1);
-      waiter.busy = true;
-      schedule(durationForTask(task.type), () => {
-        completeWaiterTask(waiter.id, task);
+
+      waiter.lastFairnessKey = selection.cursor.lastFairnessKey ?? null;
+      claimWorkBatch(waiter, nextWorkBatch);
+      schedule(durationForBatch(nextWorkBatch[0]!.type, nextWorkBatch.length), () => {
+        completeWaiterBatch(waiter.id, nextWorkBatch.map((workItem) => workItem.id));
         waiter.busy = false;
+        waiter.currentWorkItemIds = [];
+        waiter.currentWorkType = null;
         maybeDispatchWaiters();
+        updateMetrics();
       });
     }
   }
 
-  function canRunTask(task: WaiterTask): boolean {
-    const customer = state.customers.get(task.customerId);
+  function nextWorkBatchForWaiter(waiter: WaiterState) {
+    const candidates = listSimulationEntities(state.workItems)
+      .filter((workItem) => workItem.status === "open")
+      .filter((workItem) => canWaiterRunWork(waiter, workItem))
+      .map((workItem) => ({
+        item: workItem,
+        workType: workItem.type,
+        createdAtMs: workItem.createdAtMs,
+        urgencyScore: scoreWorkItem(waiter, workItem),
+        fairnessKey: workItem.type,
+        batchKey: batchKeyForWorkItem(workItem),
+      }));
+
+    return selectWorkerBatch({
+      config: currentRuntime().workerPolicies.waiter,
+      candidates,
+      cursor: { lastFairnessKey: waiter.lastFairnessKey },
+      batchCapacityForSeed: (seed) => batchCapacityForWorkType(waiter, seed.workType as WaiterTaskType),
+    });
+  }
+
+  function canWaiterRunWork(waiter: WaiterState, workItem: WorkItem) {
+    const customer = getSimulationEntity(state.customers, workItem.subjectId);
     if (!customer) {
       return false;
     }
-    switch (task.type) {
+
+    switch (workItem.type) {
       case "seat":
-        return customer.status === "greeted" && firstFreeTable() !== null;
+        return customer.status === "greeted" && firstFreeTableForWaiter(waiter.id) !== null;
       case "menu":
-        return customer.status === "seated" && Boolean(customer.tableId);
+        return customer.status === "seated" && customer.waiterId === waiter.id && Boolean(customer.tableId);
       case "order":
-        return customer.status === "ready-to-order" && Boolean(customer.orderId && customer.dish);
+        return customer.status === "ready-to-order" && customer.waiterId === waiter.id && Boolean(customer.orderId && customer.dish);
       case "serve":
-        return customer.status === "ready-to-serve" && Boolean(customer.tableId && customer.orderId && customer.dish);
+        return customer.status === "ready-to-serve" && customer.waiterId === waiter.id && Boolean(customer.tableId && customer.orderId && customer.dish);
       case "bill":
-        return customer.status === "waiting-bill" && Boolean(customer.tableId && customer.dish);
+        return customer.status === "waiting-bill" && customer.waiterId === waiter.id && Boolean(customer.tableId && customer.dish);
+      case "payment":
+        return customer.status === "ready-to-pay" && customer.waiterId === waiter.id && Boolean(customer.tableId && customer.dish);
     }
+  }
+
+  function blockedReasonForWorkItem(workItem: WorkItem) {
+    const customer = getSimulationEntity(state.customers, workItem.subjectId);
+    if (!customer) {
+      return "customer-missing";
+    }
+
+    switch (workItem.type) {
+      case "seat":
+        return listSimulationEntities(state.tables).some((table) => table.customerId === null)
+          ? "waiting-for-section-table"
+          : "no-free-tables";
+      case "menu":
+        return customer.status === "seated" ? null : "customer-not-seated";
+      case "order":
+        return customer.status === "ready-to-order" ? null : "customer-not-ready";
+      case "serve":
+        return customer.status === "ready-to-serve" ? null : "kitchen-not-ready";
+      case "bill":
+        return customer.status === "waiting-bill" ? null : "customer-still-eating";
+      case "payment":
+        return customer.status === "ready-to-pay" ? null : "bill-not-presented";
+    }
+  }
+
+  function scoreWorkItem(waiter: WaiterState, workItem: WorkItem) {
+    const customer = getSimulationEntity(state.customers, workItem.subjectId);
+    const ageScore = (now() - workItem.createdAtMs) / 250;
+    let score = WORK_TYPE_BASE_SCORE[workItem.type] + ageScore;
+
+    if (workItem.type === "seat" && firstFreeTableForWaiter(waiter.id)) {
+      score += getSimulationQueueSize(state.queue);
+    }
+
+    if (workItem.type === "serve") {
+      score += 10;
+    }
+
+    if (workItem.type === "bill" && customer?.billRequestedAtMs) {
+      score += (now() - customer.billRequestedAtMs) / 200;
+    }
+
+    if (workItem.type === "payment") {
+      score += 15;
+    }
+
+    return score;
+  }
+
+  function batchCapacityForWorkType(waiter: WaiterState, type: WaiterTaskType) {
+    if (type === "seat") {
+      return listSimulationEntities(state.tables).filter(
+        (table) => table.waiterId === waiter.id && table.customerId === null,
+      ).length;
+    }
+
+    return null;
+  }
+
+  function claimWorkBatch(waiter: WaiterState, workItems: WorkItem[]) {
+    claimSimulationWorkItems(
+      state.workItems,
+      waiter.id,
+      workItems.map((workItem) => workItem.id),
+      now(),
+    );
+    waiter.busy = true;
+    waiter.currentWorkItemIds = workItems.map((workItem) => workItem.id);
+    waiter.currentWorkType = workItems[0]?.type ?? null;
+  }
+
+  function enqueueKitchenTicket(customerId: string) {
+    const customer = getSimulationEntity(state.customers, customerId);
+    if (!customer?.orderId || !customer.dish) {
+      return null;
+    }
+
+    const existingTicket = kitchenTicketForCustomer(customerId);
+    if (existingTicket) {
+      return existingTicket;
+    }
+
+    const ticket: KitchenTicket = {
+      id: `ticket-${customer.orderId}`,
+      customerId,
+      orderId: customer.orderId,
+      tableId: customer.tableId ?? null,
+      dish: customer.dish,
+      createdAtMs: now(),
+      status: "queued",
+      batchId: null,
+    };
+    upsertSimulationEntity(state.kitchenTickets, ticket);
+
+    publish(currentRuntime().publishNodes.kitchen, `cafe/kitchen/orders/${ticket.orderId}/accepted`, {
+      ticketId: ticket.id,
+      orderId: ticket.orderId,
+      dishId: ticket.dish.id,
+      tableId: ticket.tableId,
+    });
+
+    if (
+      state.chef.busy &&
+      state.chef.currentDishId === ticket.dish.id &&
+      state.chef.currentBatchId &&
+      state.chef.currentBatchDueAtMs
+    ) {
+      ticket.status = "prepping";
+      ticket.batchId = state.chef.currentBatchId;
+      ticket.startedPrepAtMs = now();
+      state.chef.currentTicketIds.push(ticket.id);
+      publish(currentRuntime().publishNodes.kitchen, `cafe/kitchen/orders/${ticket.orderId}/prepping`, {
+        ticketId: ticket.id,
+        batchId: state.chef.currentBatchId,
+        orderId: ticket.orderId,
+        dishId: ticket.dish.id,
+        prepMs: ticket.dish.prepMs,
+        remainingPrepMs: Math.max(0, state.chef.currentBatchDueAtMs - now()),
+        batchSize: state.chef.currentTicketIds.length,
+      });
+      updateMetrics();
+      return ticket;
+    }
+
+    maybeProcessChef();
+    return ticket;
+  }
+
+  function maybeProcessChef() {
+    if (!state.running || state.chef.busy) {
+      return;
+    }
+
+    const nextBatch = nextChefBatch();
+    if (!nextBatch) {
+      return;
+    }
+
+    const batchId = `batch-${String(state.nextKitchenBatchSeq++).padStart(4, "0")}`;
+    const prepMs = nextBatch[0]?.dish.prepMs ?? 0;
+    state.chef.busy = true;
+    state.chef.currentDishId = nextBatch[0]?.dish.id ?? null;
+    state.chef.currentBatchId = batchId;
+    state.chef.currentTicketIds = nextBatch.map((ticket) => ticket.id);
+    state.chef.currentBatchDueAtMs = now() + scaledDelay(prepMs);
+
+    for (const ticket of nextBatch) {
+      ticket.status = "prepping";
+      ticket.batchId = batchId;
+      ticket.startedPrepAtMs = now();
+      publish(currentRuntime().publishNodes.kitchen, `cafe/kitchen/orders/${ticket.orderId}/prepping`, {
+        ticketId: ticket.id,
+        batchId,
+        orderId: ticket.orderId,
+        dishId: ticket.dish.id,
+        prepMs,
+        remainingPrepMs: prepMs,
+        batchSize: nextBatch.length,
+      });
+    }
+
+    updateMetrics();
+    schedule(prepMs, () => completeChefBatch(batchId));
+  }
+
+  function nextChefBatch() {
+    const queuedTickets = listSimulationEntities(state.kitchenTickets).filter(
+      (ticket) => ticket.status === "queued",
+    );
+    const groupScores = new Map<string, number>();
+    const groups = new Map<string, KitchenTicket[]>();
+
+    for (const ticket of queuedTickets) {
+      const group = groups.get(ticket.dish.id) ?? [];
+      group.push(ticket);
+      groups.set(ticket.dish.id, group);
+    }
+
+    for (const [dishId, tickets] of groups) {
+      groupScores.set(dishId, chefBatchScore(tickets));
+    }
+
+    const selection = selectWorkerBatch({
+      config: currentRuntime().workerPolicies.chef,
+      candidates: queuedTickets.map((ticket) => ({
+        item: ticket,
+        workType: "prep",
+        createdAtMs: ticket.createdAtMs,
+        urgencyScore: groupScores.get(ticket.dish.id) ?? 0,
+        batchKey: ticket.dish.id,
+        fairnessKey: ticket.dish.id,
+      })),
+      cursor: { lastFairnessKey: state.chef.lastFairnessKey },
+    });
+
+    state.chef.lastFairnessKey = selection.cursor.lastFairnessKey ?? null;
+    return selection.items.length > 0 ? selection.items : null;
+  }
+
+  function chefBatchScore(tickets: KitchenTicket[]) {
+    const oldestAge = now() - tickets[0]!.createdAtMs;
+    return oldestAge + tickets.length * 600;
+  }
+
+  function batchKeyForWorkItem(workItem: WorkItem) {
+    if (workItem.type === "serve" || workItem.type === "payment") {
+      return getSimulationEntity(state.customers, workItem.subjectId)?.tableId ?? workItem.subjectId;
+    }
+    return workItem.type;
+  }
+
+  function completeChefBatch(batchId: string) {
+    if (state.chef.currentBatchId !== batchId) {
+      return;
+    }
+
+    const readyAtMs = now();
+    const batchTickets = state.chef.currentTicketIds
+      .map((ticketId) => getSimulationEntity(state.kitchenTickets, ticketId))
+      .filter((ticket): ticket is KitchenTicket => Boolean(ticket));
+
+    for (const ticket of batchTickets) {
+      const customer = getSimulationEntity(state.customers, ticket.customerId);
+      if (!customer || customer.status !== "waiting-food") {
+        continue;
+      }
+
+      ticket.status = "ready";
+      ticket.readyAtMs = readyAtMs;
+      customer.status = "ready-to-serve";
+      publish(currentRuntime().publishNodes.kitchen, `cafe/kitchen/orders/${ticket.orderId}/ready`, {
+        ticketId: ticket.id,
+        batchId,
+        orderId: ticket.orderId,
+        tableId: ticket.tableId,
+        dishId: ticket.dish.id,
+      });
+      requestWaiterWork("serve", ticket.customerId);
+    }
+
+    state.chef.busy = false;
+    state.chef.currentDishId = null;
+    state.chef.currentBatchId = null;
+    state.chef.currentTicketIds = [];
+    state.chef.currentBatchDueAtMs = null;
+    maybeDispatchWaiters();
+    maybeProcessChef();
+    updateMetrics();
   }
 
   function durationForTask(type: WaiterTaskType) {
@@ -415,40 +794,73 @@ export function createCafeSimulation(callbacks: CafeSimulationCallbacks): CafeSi
         return config.serveMs;
       case "bill":
         return config.billMs;
+      case "payment":
+        return Math.max(400, Math.round(config.billMs * 0.75));
     }
   }
 
-  function completeWaiterTask(waiterId: string, task: WaiterTask) {
-    const customer = state.customers.get(task.customerId);
-    if (!customer) {
+  function durationForBatch(type: WaiterTaskType, count: number) {
+    const baseDuration = durationForTask(type);
+    if (count <= 1) {
+      return baseDuration;
+    }
+
+    return Math.round(baseDuration * (1 + 0.35 * (count - 1)));
+  }
+
+  function clearWorkItem(workItemId: string) {
+    removeSimulationEntity(state.workItems, workItemId);
+  }
+
+  function completeWaiterBatch(waiterId: string, workItemIds: string[]) {
+    for (const workItemId of workItemIds) {
+      completeWaiterWork(waiterId, workItemId);
+    }
+  }
+
+  function completeWaiterWork(waiterId: string, workItemId: string) {
+    const workItem = getSimulationEntity(state.workItems, workItemId);
+    if (!workItem) {
       return;
     }
 
-    if (task.type === "seat") {
-      const table = firstFreeTable();
+    const customer = getSimulationEntity(state.customers, workItem.subjectId);
+    if (!customer) {
+      clearWorkItem(workItemId);
+      return;
+    }
+
+    if (workItem.claimedByWorkerId !== waiterId) {
+      return;
+    }
+
+    if (workItem.type === "seat") {
+      const table = firstFreeTableForWaiter(waiterId);
       if (!table) {
-        requestWaiterTask("seat", customer.id);
+        reopenSimulationWorkItem(state.workItems, workItemId, "waiting-for-section-table");
         return;
       }
+
       table.customerId = customer.id;
       customer.status = "seated";
       customer.tableId = table.id;
       customer.waiterId = waiterId;
-      state.queue = state.queue.filter((queuedId) => queuedId !== customer.id);
-      publish(CAFE_NODE_IDS.seating, `cafe/tables/${table.id}/seated`, {
+      removeFromSimulationQueue(state.queue, (queuedId) => queuedId === customer.id);
+      publish(currentRuntime().publishNodes.seating, `cafe/tables/${table.id}/seated`, {
         tableId: table.id,
         customerId: customer.id,
         waiterId,
       });
-      requestWaiterTask("menu", customer.id);
+      clearWorkItem(workItemId);
+      requestWaiterWork("menu", customer.id);
       updateMetrics();
       return;
     }
 
-    if (task.type === "menu") {
+    if (workItem.type === "menu") {
       customer.status = "deciding";
       customer.menuDeliveredAtMs = now();
-      publish(CAFE_NODE_IDS.menu, `cafe/tables/${customer.tableId}/menu-delivered`, {
+      publish(currentRuntime().publishNodes.menu, `cafe/tables/${customer.tableId}/menu-delivered`, {
         tableId: customer.tableId,
         customerId: customer.id,
         dishes: currentConfig().dishes.map((dish) => ({
@@ -459,8 +871,9 @@ export function createCafeSimulation(callbacks: CafeSimulationCallbacks): CafeSi
         })),
         waiterId,
       });
+      clearWorkItem(workItemId);
       schedule(randomBetween(currentConfig().decisionMinMs, currentConfig().decisionMaxMs), () => {
-        const decidingCustomer = state.customers.get(customer.id);
+        const decidingCustomer = getSimulationEntity(state.customers, customer.id);
         if (!decidingCustomer || decidingCustomer.status !== "deciding") {
           return;
         }
@@ -468,14 +881,14 @@ export function createCafeSimulation(callbacks: CafeSimulationCallbacks): CafeSi
         decidingCustomer.dish = dish;
         decidingCustomer.orderId = `order-${customer.id}`;
         decidingCustomer.status = "ready-to-order";
-        publish(CAFE_NODE_IDS.diner, `cafe/orders/${decidingCustomer.orderId}/requested`, {
+        publish(currentRuntime().publishNodes.diner, `cafe/orders/${decidingCustomer.orderId}/requested`, {
           orderId: decidingCustomer.orderId,
           customerId: decidingCustomer.id,
           tableId: decidingCustomer.tableId,
           dishId: dish.id,
           dishName: dish.name,
         });
-        requestWaiterTask("order", decidingCustomer.id);
+        requestWaiterWork("order", decidingCustomer.id);
         maybeDispatchWaiters();
         updateMetrics();
       });
@@ -483,12 +896,14 @@ export function createCafeSimulation(callbacks: CafeSimulationCallbacks): CafeSi
       return;
     }
 
-    if (task.type === "order") {
+    if (workItem.type === "order") {
       if (!customer.dish || !customer.orderId) {
+        clearWorkItem(workItemId);
         return;
       }
+
       customer.status = "waiting-food";
-      publish(CAFE_NODE_IDS.order, `cafe/orders/${customer.orderId}/placed`, {
+      publish(currentRuntime().publishNodes.order, `cafe/orders/${customer.orderId}/placed`, {
         orderId: customer.orderId,
         customerId: customer.id,
         tableId: customer.tableId,
@@ -497,37 +912,49 @@ export function createCafeSimulation(callbacks: CafeSimulationCallbacks): CafeSi
         price: customer.dish.price,
         waiterId,
       });
-      startKitchenPipeline(customer.id);
+      clearWorkItem(workItemId);
+      enqueueKitchenTicket(customer.id);
       updateMetrics();
       return;
     }
 
-    if (task.type === "serve") {
+    if (workItem.type === "serve") {
       customer.status = "eating";
-      publish(CAFE_NODE_IDS.service, `cafe/tables/${customer.tableId}/served`, {
+      publish(currentRuntime().publishNodes.service, `cafe/tables/${customer.tableId}/served`, {
         tableId: customer.tableId,
         customerId: customer.id,
         orderId: customer.orderId,
         dishId: customer.dish?.id,
         waiterId,
       });
+      const kitchenTicket = kitchenTicketForCustomer(customer.id);
+      if (kitchenTicket) {
+        removeSimulationEntity(state.kitchenTickets, kitchenTicket.id);
+      }
+      clearWorkItem(workItemId);
       schedule(randomBetween(currentConfig().eatMinMs, currentConfig().eatMaxMs), () => {
-        const eatingCustomer = state.customers.get(customer.id);
+        const eatingCustomer = getSimulationEntity(state.customers, customer.id);
         if (!eatingCustomer || eatingCustomer.status !== "eating") {
           return;
         }
         eatingCustomer.status = "waiting-bill";
         eatingCustomer.billRequestedAtMs = now();
-        publish(CAFE_NODE_IDS.diner, `cafe/billing/${eatingCustomer.tableId}/requested`, {
+        publish(currentRuntime().publishNodes.diner, `cafe/billing/${eatingCustomer.tableId}/requested`, {
           customerId: eatingCustomer.id,
           tableId: eatingCustomer.tableId,
           orderId: eatingCustomer.orderId,
         });
-        requestWaiterTask("bill", eatingCustomer.id);
+        requestWaiterWork("bill", eatingCustomer.id);
         maybeDispatchWaiters();
         updateMetrics();
       });
       updateMetrics();
+      return;
+    }
+
+    if (workItem.type === "payment") {
+      clearWorkItem(workItemId);
+      completePayment(customer.id, waiterId);
       return;
     }
 
@@ -540,90 +967,83 @@ export function createCafeSimulation(callbacks: CafeSimulationCallbacks): CafeSi
     customer.billWaitMs = waitedMs;
     customer.tipAmount = tipAmount;
     customer.paidAmount = roundMoney(subtotal + tipAmount);
-    publish(CAFE_NODE_IDS.billing, `cafe/billing/${customer.tableId}/presented`, {
+    publish(currentRuntime().publishNodes.billing, `cafe/billing/${customer.tableId}/presented`, {
       customerId: customer.id,
       tableId: customer.tableId,
       subtotal,
       billWaitMs: waitedMs,
       waiterId,
     });
-    schedule(500, () => completePayment(customer.id));
+    customer.status = "ready-to-pay";
+    clearWorkItem(workItemId);
+    requestWaiterWork("payment", customer.id);
+    maybeDispatchWaiters();
     updateMetrics();
+    return;
   }
 
-  function startKitchenPipeline(customerId: string) {
-    const customer = state.customers.get(customerId);
-    if (!customer?.orderId || !customer.dish) {
+  function completePayment(customerId: string, waiterId: string) {
+    const customer = getSimulationEntity(state.customers, customerId);
+    if (!customer || customer.status !== "ready-to-pay") {
       return;
     }
-    publish(CAFE_NODE_IDS.kitchen, `cafe/kitchen/orders/${customer.orderId}/accepted`, {
-      orderId: customer.orderId,
-      dishId: customer.dish.id,
-      tableId: customer.tableId,
-    });
-    publish(CAFE_NODE_IDS.kitchen, `cafe/kitchen/orders/${customer.orderId}/prepping`, {
-      orderId: customer.orderId,
-      dishId: customer.dish.id,
-      prepMs: customer.dish.prepMs,
-    });
-    schedule(customer.dish.prepMs, () => {
-      const nextCustomer = state.customers.get(customerId);
-      if (!nextCustomer || nextCustomer.status !== "waiting-food" || !nextCustomer.orderId || !nextCustomer.dish) {
-        return;
-      }
-      nextCustomer.status = "ready-to-serve";
-      publish(CAFE_NODE_IDS.kitchen, `cafe/kitchen/orders/${nextCustomer.orderId}/ready`, {
-        orderId: nextCustomer.orderId,
-        tableId: nextCustomer.tableId,
-        dishId: nextCustomer.dish.id,
-      });
-      requestWaiterTask("serve", customerId);
-      maybeDispatchWaiters();
-      updateMetrics();
-    });
-  }
 
-  function completePayment(customerId: string) {
-    const customer = state.customers.get(customerId);
-    if (!customer || customer.status !== "waiting-bill") {
-      return;
-    }
     customer.status = "paid";
-    publish(CAFE_NODE_IDS.billing, `cafe/billing/${customer.tableId}/payment-submitted`, {
+    publish(currentRuntime().publishNodes.billing, `cafe/billing/${customer.tableId}/payment-submitted`, {
       customerId: customer.id,
       tableId: customer.tableId,
       subtotal: customer.dish?.price ?? 0,
       tip: customer.tipAmount ?? 0,
       total: customer.paidAmount ?? 0,
+      waiterId,
     });
 
-    const table = state.tables.find((entry) => entry.id === customer.tableId);
+    const table = customer.tableId ? tableById(customer.tableId) : null;
     if (table) {
       table.customerId = null;
     }
-    publish(CAFE_NODE_IDS.turnover, `cafe/tables/${customer.tableId}/cleared`, {
+
+    publish(currentRuntime().publishNodes.turnover, `cafe/tables/${customer.tableId}/cleared`, {
       tableId: customer.tableId,
       customerId: customer.id,
       readyForNextParty: true,
     });
     customer.status = "departed";
-    publish(CAFE_NODE_IDS.departures, `cafe/customers/${customer.id}/departed`, {
+    publish(currentRuntime().publishNodes.departures, `cafe/customers/${customer.id}/departed`, {
       customerId: customer.id,
       tableId: customer.tableId,
       total: customer.paidAmount ?? 0,
       tip: customer.tipAmount ?? 0,
     });
+
     maybeDispatchWaiters();
     maybeProcessConcierge();
-    const nextQueued = queueFrontReadyToSeat();
-    if (nextQueued) {
-      requestWaiterTask("seat", nextQueued.id);
-    }
     updateMetrics();
   }
 
+  function formatWorkItem(workItem: WorkItem) {
+    const customer = getSimulationEntity(state.customers, workItem.subjectId);
+    const waiterLabel = workItem.claimedByWorkerId
+      ? `claimed by ${workItem.claimedByWorkerId}`
+      : customer?.waiterId ?? "unassigned";
+    const targetLabel = customer?.tableId ?? customer?.id ?? workItem.subjectId;
+    const stateLabel = workItem.status === "open" ? workItem.blockedReason ?? "ready" : waiterLabel;
+    return `${workItem.type} · ${targetLabel} · ${stateLabel}`;
+  }
+
+  function formatKitchenTicket(ticket: KitchenTicket) {
+    const customer = getSimulationEntity(state.customers, ticket.customerId);
+    const batchLabel = ticket.batchId ?? "queued";
+    return `${ticket.orderId} · ${ticket.dish.name} · ${ticket.status} · ${customer?.waiterId ?? "?"} · ${batchLabel}`;
+  }
+
   function updateMetrics() {
-    const values = Array.from(state.customers.values());
+    const values = listSimulationEntities(state.customers);
+    const workItems = listSimulationEntities(state.workItems).sort((left, right) => left.createdAtMs - right.createdAtMs);
+    const kitchenTickets = listSimulationEntities(state.kitchenTickets).sort(
+      (left, right) => left.createdAtMs - right.createdAtMs,
+    );
+
     callbacks.onMetrics({
       customersSeen: values.length,
       queued: values.filter((customer) => customer.status === "queued" || customer.status === "greeted").length,
@@ -633,7 +1053,7 @@ export function createCafeSimulation(callbacks: CafeSimulationCallbacks): CafeSi
         customer.status !== "turned-away" &&
         customer.status !== "departed"
       ).length,
-      activeTables: state.tables.filter((table) => table.customerId !== null).length,
+      activeTables: listSimulationEntities(state.tables).filter((table) => table.customerId !== null).length,
       openOrders: values.filter((customer) =>
         customer.status === "waiting-food" ||
         customer.status === "ready-to-serve"
@@ -647,21 +1067,20 @@ export function createCafeSimulation(callbacks: CafeSimulationCallbacks): CafeSi
         values.reduce((sum, customer) => sum + (customer.status === "departed" ? customer.tipAmount ?? 0 : 0), 0),
       ),
     });
+
     callbacks.onQueues({
-      queueCustomers: state.queue,
-      pendingWaiterTasks: state.pendingTasks.map((task) => `${task.type}: ${task.customerId}`),
+      queueCustomers: listSimulationQueue(state.queue),
+      pendingWaiterTasks: workItems.map(formatWorkItem),
       readyOrders: values
         .filter((customer) => customer.status === "ready-to-order")
-        .map((customer) => `${customer.orderId ?? customer.id} @ ${customer.tableId ?? "?"}`),
-      kitchenTickets: values
-        .filter((customer) => customer.status === "waiting-food" || customer.status === "ready-to-serve")
-        .map((customer) => `${customer.orderId ?? customer.id} · ${customer.dish?.name ?? "dish"}`),
+        .map((customer) => `${customer.orderId ?? customer.id} @ ${customer.tableId ?? "?"} · ${customer.waiterId ?? "?"}`),
+      kitchenTickets: kitchenTickets.map(formatKitchenTicket),
       waitingBills: values
-        .filter((customer) => customer.status === "waiting-bill")
-        .map((customer) => `${customer.tableId ?? "table"} · ${customer.id}`),
-      activeTables: state.tables
+        .filter((customer) => customer.status === "waiting-bill" || customer.status === "ready-to-pay")
+        .map((customer) => `${customer.tableId ?? "table"} · ${customer.id} · ${customer.waiterId ?? "?"}`),
+      activeTables: listSimulationEntities(state.tables)
         .filter((table) => table.customerId !== null)
-        .map((table) => `${table.id}: ${table.customerId}`),
+        .map((table) => `${table.id} · ${table.waiterId}: ${table.customerId}`),
     });
   }
 

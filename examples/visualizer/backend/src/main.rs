@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use spine::{
     Address, AddressExpression, ConflationPolicy, DeliveryContext, DeliveryMode, DeliveryOptions,
     HandlerError, OverflowPolicy, Payload, PublishResult, QueuePolicy, RecursionOverflowPolicy,
@@ -40,6 +41,9 @@ struct ScenarioState {
     edges: Vec<ScenarioEdgeDefinition>,
     simulation_kind: Option<String>,
     cafe_config: Option<CafeScenarioConfig>,
+    blueprint: Option<SimulationBlueprintFile>,
+    #[serde(skip_serializing)]
+    materialized_from_blueprint: bool,
 }
 
 impl ScenarioState {
@@ -68,6 +72,8 @@ struct ScenarioFile {
     simulation_kind: Option<String>,
     #[serde(default)]
     cafe_config: Option<CafeScenarioConfig>,
+    #[serde(default)]
+    blueprint: Option<SimulationBlueprintFile>,
     config: ScenarioConfigFile,
     #[serde(default)]
     nodes: Vec<ScenarioNodeFile>,
@@ -88,6 +94,73 @@ struct ScenarioEdgeDefinition {
     id: String,
     source: String,
     target: String,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SimulationBlueprintFile {
+    primitive_schema_version: u32,
+    #[serde(default)]
+    instance_config: Option<Value>,
+    #[serde(default)]
+    globals: Option<Value>,
+    #[serde(default)]
+    nodes: Vec<BlueprintNodeFile>,
+    #[serde(default)]
+    edges: Vec<BlueprintEdgeFile>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BlueprintNodeFile {
+    id: String,
+    kind: String,
+    primitive_type: String,
+    instance_name: String,
+    title: String,
+    position: PositionFile,
+    #[serde(default)]
+    note: String,
+    #[serde(default)]
+    config: Option<Value>,
+    bindings: BlueprintBindingsFile,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BlueprintBindingsFile {
+    #[serde(default)]
+    address: Option<String>,
+    #[serde(default)]
+    payload_text: Option<String>,
+    #[serde(default)]
+    signal_kind: Option<String>,
+    #[serde(default)]
+    custom_signal_kind: Option<String>,
+    #[serde(default)]
+    expression: Option<String>,
+    #[serde(default)]
+    schema_id: Option<String>,
+    #[serde(default)]
+    delivery: Option<ScenarioDeliveryOptionsFile>,
+    #[serde(default)]
+    configuration_expression: Option<String>,
+    #[serde(default)]
+    queue_depth: Option<usize>,
+    #[serde(default)]
+    service_name: Option<String>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BlueprintEdgeFile {
+    id: String,
+    source: String,
+    target: String,
+    #[serde(default)]
+    channel: Option<String>,
+    #[serde(default)]
+    semantics: Option<Value>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -116,6 +189,12 @@ enum ScenarioNodeFile {
         id: String,
         title: String,
         position: PositionFile,
+        #[serde(default)]
+        primitive_type: Option<String>,
+        #[serde(default)]
+        instance_name: Option<String>,
+        #[serde(default)]
+        primitive_config: Option<Value>,
         address: String,
         #[serde(rename = "payloadText")]
         payload_text: String,
@@ -129,6 +208,12 @@ enum ScenarioNodeFile {
         id: String,
         title: String,
         position: PositionFile,
+        #[serde(default)]
+        primitive_type: Option<String>,
+        #[serde(default)]
+        instance_name: Option<String>,
+        #[serde(default)]
+        primitive_config: Option<Value>,
         expression: String,
         #[serde(rename = "schemaId")]
         schema_id: String,
@@ -143,6 +228,12 @@ enum ScenarioNodeFile {
         id: String,
         title: String,
         position: PositionFile,
+        #[serde(default)]
+        primitive_type: Option<String>,
+        #[serde(default)]
+        instance_name: Option<String>,
+        #[serde(default)]
+        primitive_config: Option<Value>,
         address: String,
         #[serde(rename = "serviceName")]
         service_name: String,
@@ -590,26 +681,47 @@ impl ScenarioFile {
         }
     }
 
-    fn into_app_state(self) -> AppState {
-        AppState {
+    fn into_app_state(self) -> Result<AppState, String> {
+        let materialized_from_blueprint = self.nodes.is_empty() && self.blueprint.is_some();
+        let scenario_edges = if self.edges.is_empty() {
+            self.blueprint
+                .as_ref()
+                .map(SimulationBlueprintFile::to_scenario_edges)
+                .unwrap_or_default()
+        } else {
+            self.edges.clone()
+        };
+
+        let runtime_nodes = if self.nodes.is_empty() {
+            self.blueprint
+                .as_ref()
+                .map(SimulationBlueprintFile::instantiate_nodes)
+                .transpose()?
+                .unwrap_or_default()
+        } else {
+            self.nodes
+                .into_iter()
+                .map(ScenarioNodeFile::into_runtime)
+                .collect()
+        };
+
+        Ok(AppState {
             scenario: ScenarioState {
                 id: self.id,
                 title: self.title,
                 description: self.description,
                 supports_simulation: self.supports_simulation,
-                edges: self.edges,
+                edges: scenario_edges,
                 simulation_kind: self.simulation_kind,
                 cafe_config: self.cafe_config,
+                blueprint: self.blueprint,
+                materialized_from_blueprint,
             },
             config: self.config.into_runtime(),
-            nodes: self
-                .nodes
-                .into_iter()
-                .map(ScenarioNodeFile::into_runtime)
-                .collect(),
+            nodes: runtime_nodes,
             publish_history: Vec::new(),
             publish_delivery_counts: HashMap::new(),
-        }
+        })
     }
 
     fn from_state(state: &AppState) -> Self {
@@ -620,13 +732,21 @@ impl ScenarioFile {
             supports_simulation: state.scenario.supports_simulation,
             simulation_kind: state.scenario.simulation_kind.clone(),
             cafe_config: state.scenario.cafe_config.clone(),
+            blueprint: state.scenario.blueprint.clone(),
             config: ScenarioConfigFile::from_runtime(&state.config),
-            nodes: state
-                .nodes
-                .iter()
-                .filter_map(ScenarioNodeFile::from_runtime)
-                .collect(),
-            edges: state.scenario.edges.clone(),
+            nodes: if state.scenario.materialized_from_blueprint {
+                Vec::new()
+            } else {
+                state.nodes
+                    .iter()
+                    .filter_map(ScenarioNodeFile::from_runtime)
+                    .collect()
+            },
+            edges: if state.scenario.materialized_from_blueprint {
+                Vec::new()
+            } else {
+                state.scenario.edges.clone()
+            },
         }
     }
 }
@@ -648,7 +768,7 @@ impl Default for AppState {
 
 impl AppState {
     fn for_scenario(scenario_id: &str) -> Result<Self, String> {
-        Ok(ScenarioFile::load(scenario_id)?.into_app_state())
+        ScenarioFile::load(scenario_id)?.into_app_state()
     }
 
     fn snapshot(&self) -> Snapshot {
@@ -664,6 +784,113 @@ impl AppState {
             publish_history: self.publish_history.clone(),
             routes,
             last_error: None,
+        }
+    }
+}
+
+impl SimulationBlueprintFile {
+    fn instantiate_nodes(&self) -> Result<Vec<Node>, String> {
+        self.nodes
+            .iter()
+            .cloned()
+            .map(BlueprintNodeFile::into_runtime)
+            .collect()
+    }
+
+    fn to_scenario_edges(&self) -> Vec<ScenarioEdgeDefinition> {
+        self.edges
+            .iter()
+            .map(BlueprintEdgeFile::to_scenario_edge)
+            .collect()
+    }
+}
+
+impl BlueprintNodeFile {
+    fn into_runtime(self) -> Result<Node, String> {
+        let BlueprintNodeFile {
+            id,
+            kind,
+            primitive_type,
+            instance_name,
+            title,
+            position,
+            note,
+            config,
+            bindings,
+        } = self;
+
+        match kind.as_str() {
+            "publisher" => Ok(Node::Publisher(PublisherNode {
+                id: id.clone(),
+                title,
+                last_pulse: 0,
+                position_x: position.x,
+                position_y: position.y,
+                primitive_type: Some(primitive_type),
+                instance_name: Some(instance_name),
+                primitive_config: config,
+                address: required_binding(&bindings.address, &id, "address")?,
+                payload_text: bindings.payload_text.unwrap_or_else(|| "{}".to_string()),
+                signal_kind: bindings
+                    .signal_kind
+                    .unwrap_or_else(|| "Event".to_string()),
+                custom_signal_kind: bindings.custom_signal_kind.unwrap_or_default(),
+                metadata: SignalMetadata::default(),
+                note,
+            })),
+            "subscriber" => {
+                let delivery = bindings
+                    .delivery
+                    .map(ScenarioDeliveryOptionsFile::into_runtime)
+                    .unwrap_or_default();
+                let queue_depth = bindings.queue_depth.unwrap_or(delivery.queue.max_depth);
+                Ok(Node::Subscriber(SubscriberNode {
+                    id: id.clone(),
+                    title,
+                    last_pulse: 0,
+                    position_x: position.x,
+                    position_y: position.y,
+                    primitive_type: Some(primitive_type),
+                    instance_name: Some(instance_name),
+                    primitive_config: config,
+                    expression: required_binding(&bindings.expression, &id, "expression")?,
+                    schema_id: required_binding(&bindings.schema_id, &id, "schemaId")?,
+                    delivery,
+                    received: Vec::new(),
+                    configuration_expression: bindings
+                        .configuration_expression
+                        .unwrap_or_default(),
+                    queue_depth,
+                    note,
+                }))
+            }
+            "service" => Ok(Node::Service(ServiceNode {
+                id: id.clone(),
+                title,
+                last_pulse: 0,
+                position_x: position.x,
+                position_y: position.y,
+                primitive_type: Some(primitive_type),
+                instance_name: Some(instance_name),
+                primitive_config: config,
+                address: required_binding(&bindings.address, &id, "address")?,
+                service_name: required_binding(&bindings.service_name, &id, "serviceName")?,
+                note,
+            })),
+            other => Err(format!(
+                "unsupported blueprint node kind {other} for {}",
+                id
+            )),
+        }
+    }
+}
+
+impl BlueprintEdgeFile {
+    fn to_scenario_edge(&self) -> ScenarioEdgeDefinition {
+        ScenarioEdgeDefinition {
+            id: self.id.clone(),
+            source: self.source.clone(),
+            target: self.target.clone(),
         }
     }
 }
@@ -947,6 +1174,9 @@ struct PublisherNode {
     last_pulse: u64,
     position_x: i32,
     position_y: i32,
+    primitive_type: Option<String>,
+    instance_name: Option<String>,
+    primitive_config: Option<Value>,
     address: String,
     payload_text: String,
     signal_kind: String,
@@ -963,6 +1193,9 @@ impl PublisherNode {
             last_pulse: 0,
             position_x,
             position_y,
+            primitive_type: None,
+            instance_name: None,
+            primitive_config: None,
             address: "documents/doc-1/blocks/block-9/changed".to_string(),
             payload_text: "{\n  \"blockId\": \"block-9\",\n  \"revision\": 42,\n  \"text\": \"Hello from the Rust backend\"\n}".to_string(),
             signal_kind: "Event".to_string(),
@@ -973,8 +1206,10 @@ impl PublisherNode {
     }
 
     fn to_json(&self) -> String {
-        format!(
-            "{{\"id\":{},\"type\":\"publisher\",\"position\":{{\"x\":{},\"y\":{}}},\"data\":{{\"id\":{},\"kind\":\"publisher\",\"title\":{},\"lastPulse\":{},\"address\":{},\"payloadText\":{},\"signalKind\":{},\"customSignalKind\":{},\"metadata\":{},\"note\":{}}}}}",
+        let mut out = String::new();
+        write!(
+            out,
+            "{{\"id\":{},\"type\":\"publisher\",\"position\":{{\"x\":{},\"y\":{}}},\"data\":{{\"id\":{},\"kind\":\"publisher\",\"title\":{},\"lastPulse\":{},\"address\":{},\"payloadText\":{},\"signalKind\":{},\"customSignalKind\":{},\"metadata\":{}",
             json_string(&self.id),
             self.position_x,
             self.position_y,
@@ -986,8 +1221,16 @@ impl PublisherNode {
             json_string(&self.signal_kind),
             json_string(&self.custom_signal_kind),
             signal_metadata_json(&self.metadata),
-            json_string(&self.note)
         )
+        .unwrap();
+        push_primitive_metadata(
+            &mut out,
+            &self.primitive_type,
+            &self.instance_name,
+            &self.primitive_config,
+        );
+        write!(out, ",\"note\":{}}}}}", json_string(&self.note)).unwrap();
+        out
     }
 
     fn apply(&mut self, form: &HashMap<String, String>) {
@@ -1006,6 +1249,12 @@ impl PublisherNode {
         if let Some(custom_signal_kind) = form.get("custom_signal_kind") {
             self.custom_signal_kind = custom_signal_kind.clone();
         }
+        apply_primitive_metadata(
+            &mut self.primitive_type,
+            &mut self.instance_name,
+            &mut self.primitive_config,
+            form,
+        );
     }
 }
 
@@ -1016,6 +1265,9 @@ struct SubscriberNode {
     last_pulse: u64,
     position_x: i32,
     position_y: i32,
+    primitive_type: Option<String>,
+    instance_name: Option<String>,
+    primitive_config: Option<Value>,
     expression: String,
     schema_id: String,
     delivery: DeliveryOptionsDto,
@@ -1033,6 +1285,9 @@ impl SubscriberNode {
             last_pulse: 0,
             position_x,
             position_y,
+            primitive_type: None,
+            instance_name: None,
+            primitive_config: None,
             expression: "documents/{document_id}/blocks/{block_id}/changed".to_string(),
             schema_id: "document.block.changed.v1".to_string(),
             delivery: DeliveryOptionsDto::default(),
@@ -1070,15 +1325,22 @@ impl SubscriberNode {
             }
             out.push_str(&item.to_json());
         }
+        out.push(']');
+        push_primitive_metadata(
+            &mut out,
+            &self.primitive_type,
+            &self.instance_name,
+            &self.primitive_config,
+        );
         write!(
             out,
-            "],\"configurationExpression\":{},\"queueDepth\":{},\"note\":{}}}",
+            ",\"configurationExpression\":{},\"queueDepth\":{},\"note\":{}}}",
             json_string(&self.configuration_expression),
             self.queue_depth,
             json_string(&self.note),
         )
         .unwrap();
-        out.push('}');
+        out.push_str("}");
         out
     }
 
@@ -1129,6 +1391,12 @@ impl SubscriberNode {
         if let Some(configuration_expression) = form.get("configuration_expression") {
             self.configuration_expression = configuration_expression.clone();
         }
+        apply_primitive_metadata(
+            &mut self.primitive_type,
+            &mut self.instance_name,
+            &mut self.primitive_config,
+            form,
+        );
     }
 }
 
@@ -1139,6 +1407,9 @@ struct ServiceNode {
     last_pulse: u64,
     position_x: i32,
     position_y: i32,
+    primitive_type: Option<String>,
+    instance_name: Option<String>,
+    primitive_config: Option<Value>,
     address: String,
     service_name: String,
     note: String,
@@ -1152,6 +1423,9 @@ impl ServiceNode {
             last_pulse: 0,
             position_x,
             position_y,
+            primitive_type: None,
+            instance_name: None,
+            primitive_config: None,
             address: "services/search/default".to_string(),
             service_name: "SearchService".to_string(),
             note: "Lookup through address space".to_string(),
@@ -1159,8 +1433,10 @@ impl ServiceNode {
     }
 
     fn to_json(&self) -> String {
-        format!(
-            "{{\"id\":{},\"type\":\"service\",\"position\":{{\"x\":{},\"y\":{}}},\"data\":{{\"id\":{},\"kind\":\"service\",\"title\":{},\"lastPulse\":{},\"address\":{},\"serviceName\":{},\"note\":{}}}}}",
+        let mut out = String::new();
+        write!(
+            out,
+            "{{\"id\":{},\"type\":\"service\",\"position\":{{\"x\":{},\"y\":{}}},\"data\":{{\"id\":{},\"kind\":\"service\",\"title\":{},\"lastPulse\":{},\"address\":{},\"serviceName\":{}",
             json_string(&self.id),
             self.position_x,
             self.position_y,
@@ -1169,8 +1445,16 @@ impl ServiceNode {
             self.last_pulse,
             json_string(&self.address),
             json_string(&self.service_name),
-            json_string(&self.note)
         )
+        .unwrap();
+        push_primitive_metadata(
+            &mut out,
+            &self.primitive_type,
+            &self.instance_name,
+            &self.primitive_config,
+        );
+        write!(out, ",\"note\":{}}}}}", json_string(&self.note)).unwrap();
+        out
     }
 
     fn apply(&mut self, form: &HashMap<String, String>) {
@@ -1183,6 +1467,12 @@ impl ServiceNode {
         if let Some(service_name) = form.get("service_name") {
             self.service_name = service_name.clone();
         }
+        apply_primitive_metadata(
+            &mut self.primitive_type,
+            &mut self.instance_name,
+            &mut self.primitive_config,
+            form,
+        );
     }
 }
 
@@ -1522,6 +1812,9 @@ impl ScenarioNodeFile {
                 id,
                 title,
                 position,
+                primitive_type,
+                instance_name,
+                primitive_config,
                 address,
                 payload_text,
                 signal_kind,
@@ -1533,6 +1826,9 @@ impl ScenarioNodeFile {
                 last_pulse: 0,
                 position_x: position.x,
                 position_y: position.y,
+                primitive_type,
+                instance_name,
+                primitive_config,
                 address,
                 payload_text,
                 signal_kind,
@@ -1544,6 +1840,9 @@ impl ScenarioNodeFile {
                 id,
                 title,
                 position,
+                primitive_type,
+                instance_name,
+                primitive_config,
                 expression,
                 schema_id,
                 delivery,
@@ -1556,6 +1855,9 @@ impl ScenarioNodeFile {
                 last_pulse: 0,
                 position_x: position.x,
                 position_y: position.y,
+                primitive_type,
+                instance_name,
+                primitive_config,
                 expression,
                 schema_id,
                 delivery: delivery.into_runtime(),
@@ -1568,6 +1870,9 @@ impl ScenarioNodeFile {
                 id,
                 title,
                 position,
+                primitive_type,
+                instance_name,
+                primitive_config,
                 address,
                 service_name,
                 note,
@@ -1577,6 +1882,9 @@ impl ScenarioNodeFile {
                 last_pulse: 0,
                 position_x: position.x,
                 position_y: position.y,
+                primitive_type,
+                instance_name,
+                primitive_config,
                 address,
                 service_name,
                 note,
@@ -1593,6 +1901,9 @@ impl ScenarioNodeFile {
                     x: node.position_x,
                     y: node.position_y,
                 },
+                primitive_type: node.primitive_type.clone(),
+                instance_name: node.instance_name.clone(),
+                primitive_config: node.primitive_config.clone(),
                 address: node.address.clone(),
                 payload_text: node.payload_text.clone(),
                 signal_kind: node.signal_kind.clone(),
@@ -1606,6 +1917,9 @@ impl ScenarioNodeFile {
                     x: node.position_x,
                     y: node.position_y,
                 },
+                primitive_type: node.primitive_type.clone(),
+                instance_name: node.instance_name.clone(),
+                primitive_config: node.primitive_config.clone(),
                 expression: node.expression.clone(),
                 schema_id: node.schema_id.clone(),
                 delivery: ScenarioDeliveryOptionsFile::from_runtime(&node.delivery),
@@ -1620,6 +1934,9 @@ impl ScenarioNodeFile {
                     x: node.position_x,
                     y: node.position_y,
                 },
+                primitive_type: node.primitive_type.clone(),
+                instance_name: node.instance_name.clone(),
+                primitive_config: node.primitive_config.clone(),
                 address: node.address.clone(),
                 service_name: node.service_name.clone(),
                 note: node.note.clone(),
@@ -2000,6 +2317,64 @@ fn opt_num(value: Option<u64>) -> String {
 
 fn opt_string(value: Option<&str>) -> String {
     value.map(json_string).unwrap_or_else(|| "null".to_string())
+}
+
+fn push_primitive_metadata(
+    out: &mut String,
+    primitive_type: &Option<String>,
+    instance_name: &Option<String>,
+    primitive_config: &Option<Value>,
+) {
+    if let Some(primitive_type) = primitive_type {
+        write!(out, ",\"primitiveType\":{}", json_string(primitive_type)).unwrap();
+    }
+    if let Some(instance_name) = instance_name {
+        write!(out, ",\"instanceName\":{}", json_string(instance_name)).unwrap();
+    }
+    if let Some(primitive_config) = primitive_config {
+        out.push_str(",\"primitiveConfig\":");
+        out.push_str(&primitive_config.to_string());
+    }
+}
+
+fn apply_primitive_metadata(
+    primitive_type: &mut Option<String>,
+    instance_name: &mut Option<String>,
+    primitive_config: &mut Option<Value>,
+    form: &HashMap<String, String>,
+) {
+    if let Some(value) = form.get("primitive_type") {
+        *primitive_type = if value.is_empty() {
+            None
+        } else {
+            Some(value.clone())
+        };
+    }
+    if let Some(value) = form.get("instance_name") {
+        *instance_name = if value.is_empty() {
+            None
+        } else {
+            Some(value.clone())
+        };
+    }
+    if let Some(value) = form.get("primitive_config") {
+        *primitive_config = if value.is_empty() {
+            None
+        } else {
+            serde_json::from_str(value).ok()
+        };
+    }
+}
+
+fn required_binding<'a>(
+    value: &'a Option<String>,
+    node_id: &str,
+    field: &str,
+) -> Result<String, String> {
+    value
+        .clone()
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| format!("blueprint node {node_id} is missing bindings.{field}"))
 }
 
 fn json_string(value: &str) -> String {

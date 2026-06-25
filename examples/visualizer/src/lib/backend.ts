@@ -72,9 +72,16 @@ function encodeForm(fields: Record<string, string>): string {
 }
 
 function encodeNode(node: DemoNodeData): string {
+  const primitiveFields = {
+    primitive_type: node.primitiveType ?? "",
+    instance_name: node.instanceName ?? "",
+    primitive_config: node.primitiveConfig ? JSON.stringify(node.primitiveConfig) : "",
+  };
+
   switch (node.kind) {
     case "publisher":
       return encodeForm({
+        ...primitiveFields,
         title: node.title,
         address: node.address,
         payload_text: node.payloadText,
@@ -83,6 +90,7 @@ function encodeNode(node: DemoNodeData): string {
       });
     case "subscriber":
       return encodeForm({
+        ...primitiveFields,
         title: node.title,
         expression: node.expression,
         schema_id: node.schemaId,
@@ -103,6 +111,7 @@ function encodeNode(node: DemoNodeData): string {
       });
     case "service":
       return encodeForm({
+        ...primitiveFields,
         title: node.title,
         address: node.address,
         service_name: node.serviceName,
